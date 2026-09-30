@@ -2,9 +2,12 @@ package com.memoflow.service
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
+import com.memoflow.MainActivity
 import com.memoflow.data.ChunkSyncWorker
 import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
@@ -14,16 +17,7 @@ import com.memoflow.recording.AudioRecordSource
 import com.memoflow.recording.EnergyVadEngine
 import com.memoflow.recording.M4aChunkWriter
 import java.io.File
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 
 class RecordingForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -48,33 +42,60 @@ class RecordingForegroundService : Service() {
     private fun startRecording() {
         if (job?.isActive == true) return
 
-        startForeground(
-            NOTIFICATION_ID,
-            NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("MemoFlow recording")
-                .setContentText("Microphone capture is active")
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setOngoing(true)
-                .build(),
-        )
+        getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_RECORDING_ACTIVE, true)
+            .putLong(KEY_RECORDING_STARTED_AT, System.currentTimeMillis())
+            .apply()
+
+        startForeground(NOTIFICATION_ID, buildNotification())
 
         job =
-            scope.launch {
-                runRecordingLoop()
-            }.also { runningJob ->
-                runningJob.invokeOnCompletion {
-                    job = null
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+            scope.launch { runRecordingLoop() }
+                .also { runningJob ->
+                    runningJob.invokeOnCompletion {
+                        getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
+                            .edit()
+                            .putBoolean(KEY_RECORDING_ACTIVE, false)
+                            .apply()
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
                 }
-            }
     }
+
+    private fun buildNotification() =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("回声正在记录")
+            .setContentText("声音保存在本机，可在应用内回听")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    10,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            .addAction(
+                android.R.drawable.ic_media_pause,
+                "结束",
+                PendingIntent.getService(
+                    this,
+                    11,
+                    Intent(this, RecordingForegroundService::class.java).setAction(ACTION_STOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            .build()
 
     private suspend fun runRecordingLoop() {
         val source = AudioRecordSource()
         var encoder = AacMediaCodecEncoder()
         var writer = M4aChunkWriter(File(filesDir, "audio"))
-        var vad = EnergyVadEngine()
+        val prefs = getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
+        var vad = EnergyVadEngine(threshold = prefs.getFloat(KEY_VAD_THRESHOLD, 0.012f).toDouble())
         var chunkStartMs = System.currentTimeMillis()
         val ranges = mutableListOf<AudioRange>()
 
@@ -85,7 +106,6 @@ class RecordingForegroundService : Service() {
 
             while (currentCoroutineContext().isActive) {
                 val frame = source.read() ?: break
-
                 ranges += vad.process(frame).map { it.copy(chunkId = writer.currentId) }
 
                 val encoded = encoder.encode(frame)
@@ -100,24 +120,16 @@ class RecordingForegroundService : Service() {
                     encoder = AacMediaCodecEncoder()
                     encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
                     writer = M4aChunkWriter(File(filesDir, "audio")).also { it.start() }
-                    vad = EnergyVadEngine()
+                    vad = EnergyVadEngine(threshold = prefs.getFloat(KEY_VAD_THRESHOLD, 0.012f).toDouble())
                     chunkStartMs = System.currentTimeMillis()
                 }
             }
         } finally {
             withContext(NonCancellable) {
-                runCatching {
-                    finalizeEncoderIntoWriter(encoder, writer)
-                }
-                runCatching {
-                    finishChunk(writer, ranges)
-                }
-                runCatching {
-                    encoder.close()
-                }
-                runCatching {
-                    source.stop()
-                }
+                runCatching { finalizeEncoderIntoWriter(encoder, writer) }
+                runCatching { finishChunk(writer, ranges) }
+                runCatching { encoder.close() }
+                runCatching { source.stop() }
             }
         }
     }
@@ -162,7 +174,7 @@ class RecordingForegroundService : Service() {
                 .createNotificationChannel(
                     NotificationChannel(
                         CHANNEL_ID,
-                        "Recording",
+                        "持续录音",
                         NotificationManager.IMPORTANCE_LOW,
                     ),
                 )
@@ -173,6 +185,11 @@ class RecordingForegroundService : Service() {
         const val ACTION_START = "start"
         const val ACTION_STOP = "stop"
         const val CHANNEL_ID = "recording"
+
+        const val PREFS_RECORDING = "recording"
+        const val KEY_RECORDING_ACTIVE = "recording_active"
+        const val KEY_RECORDING_STARTED_AT = "recording_started_at"
+        const val KEY_VAD_THRESHOLD = "vad_threshold"
 
         private const val NOTIFICATION_ID = 7
         private const val SAMPLE_RATE = 16000
