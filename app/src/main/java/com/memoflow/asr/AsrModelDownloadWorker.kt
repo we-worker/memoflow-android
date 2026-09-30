@@ -12,6 +12,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -121,7 +122,7 @@ class AsrModelDownloadWorker(
                             var downloaded = 0L
                             var lastPercent = -1
                             while (true) {
-                                coroutineContext.ensureActive()
+                                currentCoroutineContext().ensureActive()
                                 val count = input.read(buffer)
                                 if (count < 0) break
                                 out.write(buffer, 0, count)
