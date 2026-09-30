@@ -2,8 +2,6 @@ package com.memoflow.data
 
 import android.content.Context
 import androidx.room.*
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "audio_chunks")
@@ -169,42 +167,14 @@ abstract class MemoDatabase : RoomDatabase() {
     companion object {
         @Volatile private var INSTANCE: MemoDatabase? = null
 
-        private val MIGRATION_1_2 =
-            object : Migration(1, 2) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL(
-                        """CREATE TABLE IF NOT EXISTS transcript_segments (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                            chunkId TEXT NOT NULL,
-                            startOffsetMs INTEGER NOT NULL,
-                            endOffsetMs INTEGER NOT NULL,
-                            text TEXT NOT NULL,
-                            language TEXT,
-                            modelId TEXT,
-                            modelVersion TEXT
-                        )""".trimIndent()
-                    )
-                }
-            }
-
-        private val MIGRATION_2_3 =
-            object : Migration(2, 3) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL("ALTER TABLE audio_chunks ADD COLUMN speechAudioPath TEXT")
-                    db.execSQL("ALTER TABLE audio_chunks ADD COLUMN speechDurationMs INTEGER NOT NULL DEFAULT 0")
-                    db.execSQL("ALTER TABLE audio_chunks ADD COLUMN waveformPath TEXT")
-                    db.execSQL("ALTER TABLE audio_chunks ADD COLUMN postProcessState TEXT NOT NULL DEFAULT 'READY'")
-                    db.execSQL("ALTER TABLE audio_chunks ADD COLUMN originalAvailable INTEGER NOT NULL DEFAULT 1")
-                }
-            }
-
         fun get(context: Context): MemoDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     MemoDatabase::class.java,
                     "memoflow.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                )
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }
