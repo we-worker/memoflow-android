@@ -222,7 +222,7 @@ private fun TodayScreen(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SmallStat("记录", "${todayChunks.size} 段", Modifier.weight(1f))
             SmallStat("时长", formatDuration(totalDuration), Modifier.weight(1f))
-            SmallStat("VAD", "$rangeCount 段", Modifier.weight(1f))
+            SmallStat("会话段", "$rangeCount 段", Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SmallStat("已同步", "$uploaded 段", Modifier.weight(1f))
@@ -560,7 +560,7 @@ private fun RecordingDetailScreen(
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("VAD 裁剪版", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "保留语音区间，并自动加入 400 ms 前置和 500 ms 后置保护。裁剪后约 " +
+                            "按会话段保留音频；小于分段阈值的停顿也会保留，并在段首尾加入 400 ms / 500 ms 保护。裁剪后约 " +
                                 formatDuration(chunk.speechDurationMs) + "。",
                             color = EchoMuted,
                             fontSize = 12.sp,
@@ -920,7 +920,7 @@ private fun WaveformAudioPlayer(
                     modifier = Modifier.size(width = 22.dp, height = 10.dp),
                 ) {}
                 Spacer(Modifier.width(7.dp))
-                Text("蓝色背景 = Silero VAD speech", color = EchoMuted, fontSize = 11.sp)
+                Text("蓝色背景 = 合并后的会话段（可包含短暂停顿）", color = EchoMuted, fontSize = 11.sp)
             }
         }
     }
