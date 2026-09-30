@@ -13,6 +13,7 @@ import com.memoflow.processing.WaveformStore
 import com.memoflow.recording.RemoteAsrEngine
 import com.memoflow.service.BootReceiver
 import com.memoflow.service.RecordingForegroundService
+import com.memoflow.vad.VadBackend
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +30,7 @@ data class EchoSettings(
     val apiKey: String = "",
     val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
+    val vadBackend: VadBackend = VadBackend.SILERO,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
     val vadSegmentGapMinutes: Int = RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
     val cleanupRetentionDays: Int = 7,
@@ -98,7 +100,8 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         val current = settings.value
         val desiredGapMs = current.vadSegmentGapMinutes * 60_000L
         val parametersMatch =
-            kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
+            chunk.appliedVadEngine == current.vadBackend.name &&
+                kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
                 chunk.appliedVadMergeSilenceMs == desiredGapMs
 
         if (chunk.postProcessState == "DONE" && parametersMatch) return
@@ -133,11 +136,44 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         _settings.value = _settings.value.copy(autoResume = enabled)
     }
 
+    fun setVadBackend(backend: VadBackend) {
+        recordingPrefs.edit()
+            .putString(RecordingForegroundService.KEY_VAD_ENGINE, backend.name)
+            .apply()
+
+        val threshold =
+            when (backend) {
+                VadBackend.SILERO ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                    )
+                VadBackend.FIRERED_NON_STREAM,
+                VadBackend.FIRERED_STREAM ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_FIRERED_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_FIRERED_THRESHOLD,
+                    )
+            }.coerceIn(0.05f, 0.95f)
+
+        _settings.value =
+            _settings.value.copy(
+                vadBackend = backend,
+                vadThreshold = threshold,
+            )
+        viewModelScope.launch { dao.markPostProcessStale() }
+    }
+
     fun setVadThreshold(value: Float) {
         val safe = value.coerceIn(0.05f, 0.95f)
-        recordingPrefs.edit()
-            .putFloat(RecordingForegroundService.KEY_SILERO_THRESHOLD, safe)
-            .apply()
+        val key =
+            if (_settings.value.vadBackend == VadBackend.SILERO) {
+                RecordingForegroundService.KEY_SILERO_THRESHOLD
+            } else {
+                RecordingForegroundService.KEY_FIRERED_THRESHOLD
+            }
+
+        recordingPrefs.edit().putFloat(key, safe).apply()
         _settings.value = _settings.value.copy(vadThreshold = safe)
         viewModelScope.launch { dao.markPostProcessStale() }
     }
@@ -364,17 +400,36 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun loadSettings() =
-        EchoSettings(
+    private fun loadSettings(): EchoSettings {
+        val backend =
+            VadBackend.fromStored(
+                recordingPrefs.getString(
+                    RecordingForegroundService.KEY_VAD_ENGINE,
+                    RecordingForegroundService.DEFAULT_VAD_ENGINE,
+                ),
+            )
+        val threshold =
+            when (backend) {
+                VadBackend.SILERO ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                    )
+                VadBackend.FIRERED_NON_STREAM,
+                VadBackend.FIRERED_STREAM ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_FIRERED_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_FIRERED_THRESHOLD,
+                    )
+            }.coerceIn(0.05f, 0.95f)
+
+        return EchoSettings(
             baseUrl = syncPrefs.getString(ChunkSyncWorker.KEY_BASE_URL, "") ?: "",
             apiKey = syncPrefs.getString(ChunkSyncWorker.KEY_API_KEY, "") ?: "",
             wifiOnly = syncPrefs.getBoolean("wifi_only", true),
             autoResume = recordingPrefs.getBoolean(BootReceiver.KEY_AUTO_START, true),
-            vadThreshold =
-                recordingPrefs.getFloat(
-                    RecordingForegroundService.KEY_SILERO_THRESHOLD,
-                    RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
-                ).coerceIn(0.05f, 0.95f),
+            vadBackend = backend,
+            vadThreshold = threshold,
             vadSegmentGapMinutes =
                 recordingPrefs.getInt(
                     RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
@@ -383,6 +438,7 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             cleanupRetentionDays =
                 recordingPrefs.getInt(KEY_CLEANUP_RETENTION_DAYS, 7).coerceIn(1, 30),
         )
+    }
 
     private fun loadAsrSettings(): AsrSettings {
         val provider =
