@@ -82,8 +82,8 @@ android {
         applicationId = "com.memoflow"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0-demo"
+        versionCode = 4
+        versionName = "0.4.0-demo"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -122,6 +122,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.apache.commons:commons-compress:1.27.1")
 
     implementation("com.k2fsa:sherpa-onnx:" + sherpaVersion + "@aar")
 
