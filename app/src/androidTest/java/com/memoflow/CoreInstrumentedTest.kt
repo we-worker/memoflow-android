@@ -11,6 +11,7 @@ import com.memoflow.data.MemoDatabase
 import com.memoflow.domain.AudioFrame
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
+import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import com.memoflow.service.BootReceiver
 import java.io.File
 import kotlinx.coroutines.flow.first
@@ -111,6 +112,27 @@ class CoreInstrumentedTest {
             assertTrue("M4A duration should be positive", duration > 0L)
         } finally {
             retriever.release()
+        }
+    }
+
+    @Test
+    fun sherpaSileroVadLoadsModelAndAcceptsPcm() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val vad = SherpaOnnxSileroVadEngine(context)
+        try {
+            repeat(12) { index ->
+                vad.process(
+                    AudioFrame(
+                        pcm = sineLikePcm(index),
+                        timestampNs = index * 100_000_000L,
+                        sampleRate = 16000,
+                        channels = 1,
+                    ),
+                )
+            }
+            vad.flush()
+        } finally {
+            vad.close()
         }
     }
 
