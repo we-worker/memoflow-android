@@ -74,19 +74,19 @@ object LocalAsrModelCatalog {
             ),
             LocalAsrModelSpec(
                 id = "paraformer-zh-int8",
-                displayName = "Paraformer 中文 INT8",
-                version = "2025-10-07",
+                displayName = "Paraformer 中英 INT8",
+                version = "2023-09-14",
                 family = LocalAsrFamily.PARAFORMER,
-                description = "体积和运行压力更小，适合普通话及部分中文方言场景。",
-                languages = "中文为主",
-                archiveName = "sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2",
-                archiveRootDir = "sherpa-onnx-paraformer-zh-int8-2025-10-07",
-                archiveBytes = 228_262_632L,
-                sha256 = "a071ee5419e14adb34d7f970ab98105a45e6608018b168f023ca2e4810744abe",
+                description = "通用中英双语 Paraformer INT8；支持普通话及河南、天津、四川等中文口音/方言。",
+                languages = "中文 + 英文",
+                archiveName = "sherpa-onnx-paraformer-zh-2023-09-14.tar.bz2",
+                archiveRootDir = "sherpa-onnx-paraformer-zh-2023-09-14",
+                archiveBytes = 234_051_698L,
+                sha256 = "",
                 downloadUrls =
                     listOf(
-                        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2",
-                        "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/301503409",
+                        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-2023-09-14.tar.bz2",
+                        "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/155857985",
                     ),
                 requiredFiles =
                     listOf(
