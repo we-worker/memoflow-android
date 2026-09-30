@@ -21,7 +21,7 @@ internal fun groupVadSessions(
     for (next in sorted.drop(1)) {
         val silenceGap = next.startOffsetMs - current.endOffsetMs
         current =
-            if (silenceGap <= mergeSilenceMs) {
+            if (silenceGap < mergeSilenceMs) {
                 current.copy(
                     startOffsetMs = current.startOffsetMs.coerceAtLeast(0L),
                     endOffsetMs =
