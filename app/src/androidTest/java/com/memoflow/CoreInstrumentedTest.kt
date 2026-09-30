@@ -303,6 +303,39 @@ class CoreInstrumentedTest {
     }
 
     @Test
+    fun fireRedVadNonStreamAndStreamLoadAndRunOnAndroid() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val backendClass = Class.forName("com.memoflow.vad.VadBackend")
+        val engineClass = Class.forName("com.memoflow.vad.FireRedVadEngine")
+        val constructor =
+            engineClass.getConstructor(
+                Context::class.java,
+                backendClass,
+                Float::class.javaPrimitiveType,
+            )
+        val valueOf =
+            backendClass.getMethod("valueOf", String::class.java)
+        val smoke =
+            engineClass.getMethod("smokeDetectPcm", ByteArray::class.java)
+
+        val pcm = ByteArray(3200 * 30)
+        repeat(30) { frame ->
+            val source = sineLikePcm(frame)
+            source.copyInto(pcm, destinationOffset = frame * source.size)
+        }
+
+        for (name in listOf("FIRERED_NON_STREAM", "FIRERED_STREAM")) {
+            val backend = valueOf.invoke(null, name)
+            val engine = constructor.newInstance(context, backend, 0.4f)
+            val frameCount = smoke.invoke(engine, pcm) as Int
+            assertTrue(
+                "FireRed backend " + name + " should return frame probabilities",
+                frameCount > 100,
+            )
+        }
+    }
+
+    @Test
     fun sherpaSileroVadLoadsModelAndAcceptsPcm() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val clazz =
