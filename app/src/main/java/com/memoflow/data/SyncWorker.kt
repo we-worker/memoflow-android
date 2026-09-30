@@ -22,7 +22,8 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
             val db = MemoDatabase.get(applicationContext)
             val prefs = applicationContext.getSharedPreferences(PREFS_SYNC, Context.MODE_PRIVATE)
             val api = prefs.getString(KEY_BASE_URL, "")?.trimEnd('/') ?: ""
-            if (api.isBlank()) return@withContext Result.success()
+            val apiKey = prefs.getString(KEY_API_KEY, "") ?: ""
+            if (api.isBlank() || apiKey.isBlank()) return@withContext Result.success()
 
             var retry = false
             for (chunk in db.chunks().pending()) {
@@ -62,7 +63,10 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
                                             JSONObject()
                                                 .put("startOffsetMs", range.startOffsetMs)
                                                 .put("endOffsetMs", range.endOffsetMs)
-                                                .put("confidence", range.confidence),
+                                                .put("type", range.type)
+                                                .put("confidence", range.confidence)
+                                                .put("modelId", range.modelId)
+                                                .put("modelVersion", range.modelVersion),
                                         )
                                     }
                                 },
@@ -82,13 +86,17 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
                             .build()
 
                     client.newCall(
-                        Request.Builder().url("$api/audio").post(body).build(),
+                        Request.Builder()
+                            .url(api + "/audio")
+                            .header(API_KEY_HEADER, apiKey)
+                            .post(body)
+                            .build(),
                     ).execute().use { response ->
                         if (response.isSuccessful) {
                             db.chunks().updateState(chunk.id, "UPLOADED")
                         } else {
                             db.chunks().updateState(chunk.id, "FAILED")
-                            retry = true
+                            retry = response.code >= 500
                         }
                     }
                 } catch (_: Exception) {
@@ -103,6 +111,8 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
     companion object {
         const val PREFS_SYNC = "sync"
         const val KEY_BASE_URL = "base_url"
+        const val KEY_API_KEY = "api_key"
+        const val API_KEY_HEADER = "X-MemoFlow-Key"
 
         fun schedule(context: Context) {
             val prefs = context.getSharedPreferences(PREFS_SYNC, Context.MODE_PRIVATE)
