@@ -11,7 +11,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,13 +95,19 @@ fun EchoApp(
             },
         ) { padding ->
             if (detailChunk != null) {
+                LaunchedEffect(detailChunk.id, detailChunk.postProcessState) {
+                    viewModel.ensurePostProcessed(detailChunk)
+                }
+
                 RecordingDetailScreen(
                     chunk = detailChunk,
                     ranges = remember(detailChunk.id) { viewModel.ranges(detailChunk.id) },
                     transcripts = remember(detailChunk.id) { viewModel.transcripts(detailChunk.id) },
                     asrState = asrState,
+                    loadWaveform = { viewModel.loadWaveform(detailChunk.waveformPath) },
                     onBack = { detailId = null },
                     onTranscribe = { viewModel.transcribe(detailChunk) },
+                    onDeleteOriginal = { viewModel.deleteOriginal(detailChunk) },
                     onDelete = { viewModel.deleteChunk(detailChunk) { detailId = null } },
                     modifier = Modifier.padding(padding),
                 )
@@ -141,9 +150,12 @@ fun EchoApp(
                     EchoSection.Settings ->
                         SettingsScreen(
                             settings = settings,
+                            chunks = chunks,
                             onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
                             onVadThreshold = viewModel::setVadThreshold,
+                            onCleanupRetentionDays = viewModel::setCleanupRetentionDays,
+                            onDeleteOriginals = viewModel::deleteOriginals,
                             modifier = Modifier.padding(padding),
                         )
                 }
@@ -257,7 +269,7 @@ private fun RecordingHero(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Mic, null, tint = Color(0xFFB9CAFF))
                 Spacer(Modifier.width(8.dp))
-                Text("VAD 持续记录", color = Color(0xFFC8D7FA), fontSize = 13.sp)
+                Text("低功耗持续录音", color = Color(0xFFC8D7FA), fontSize = 13.sp)
                 Spacer(Modifier.weight(1f))
                 if (active) {
                     Surface(color = Color(0xFF243A6B), shape = RoundedCornerShape(30.dp)) {
@@ -279,7 +291,7 @@ private fun RecordingHero(
             )
             Text(
                 if (active) {
-                    "原始音频持续保存；VAD 只标记语音区间，不控制录音开关。"
+                    "录音期间不运行 VAD；每个 10 分钟 chunk 完成后再后台分析和裁剪。"
                 } else {
                     "录音以 10 分钟 M4A 分片保存，可在历史记录中回听和转写。"
                 },
@@ -410,14 +422,50 @@ private fun RecordingDetailScreen(
     ranges: Flow<List<AudioRangeEntity>>,
     transcripts: Flow<List<TranscriptSegmentEntity>>,
     asrState: AsrUiState,
+    loadWaveform: suspend () -> List<Float>,
     onBack: () -> Unit,
     onTranscribe: () -> Unit,
+    onDeleteOriginal: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val rangeList by ranges.collectAsState(initial = emptyList())
     val transcriptList by transcripts.collectAsState(initial = emptyList())
+    val waveform by produceState(
+        initialValue = emptyList<Float>(),
+        key1 = chunk.waveformPath,
+        key2 = chunk.postProcessState,
+    ) {
+        value = loadWaveform()
+    }
+
     var tab by rememberSaveable(chunk.id) { mutableIntStateOf(0) }
+    var previewRequest by remember(chunk.id) { mutableStateOf<VadPreviewRequest?>(null) }
+    var confirmDeleteOriginal by remember { mutableStateOf(false) }
+
+    if (confirmDeleteOriginal) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteOriginal = false },
+            icon = { Icon(Icons.Outlined.WarningAmber, null) },
+            title = { Text("删除原始录音？") },
+            text = {
+                Text(
+                    "只删除原始 M4A。VAD 裁剪版、波形、VAD 区间和转写结果会保留。删除后将无法再用原始时间轴精确复核 VAD 边界。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDeleteOriginal = false
+                        onDeleteOriginal()
+                    },
+                ) { Text("确认删除原素材", color = Color(0xFFBE4757)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteOriginal = false }) { Text("取消") }
+            },
+        )
+    }
 
     Column(modifier = modifier.fillMaxSize().background(EchoBg)) {
         Row(
@@ -430,7 +478,7 @@ private fun RecordingDetailScreen(
                 Text(formatDateTime(chunk.startTimeUtcMs), fontSize = 12.sp, color = EchoMuted)
             }
             IconButton(onClick = onDelete) {
-                Icon(Icons.Outlined.Delete, "删除", tint = Color(0xFFBE4757))
+                Icon(Icons.Outlined.Delete, "删除整条记录", tint = Color(0xFFBE4757))
             }
         }
 
@@ -446,16 +494,87 @@ private fun RecordingDetailScreen(
                 border = BorderStroke(1.dp, Color(0xFFE6EBF3)),
             ) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("原始录音", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("原始录音", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.weight(1f))
+                        if (!chunk.originalAvailable) {
+                            AssistChip(onClick = {}, label = { Text("原素材已删除") })
+                        }
+                    }
                     Text(
-                        "${formatDuration(chunk.durationMs)} · ${formatBytes(chunk.fileSize)} · ${chunk.codec.uppercase()} / ${chunk.container.uppercase()}",
+                        formatDuration(chunk.durationMs) + " · " +
+                            formatBytes(chunk.fileSize) + " · " +
+                            chunk.codec.uppercase() + " / " + chunk.container.uppercase(),
                         color = EchoMuted,
                     )
                     StateBadge(chunk.state)
+
+                    when (chunk.postProcessState) {
+                        "PENDING", "PROCESSING" -> {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                            Text(
+                                if (chunk.postProcessState == "PENDING") {
+                                    "等待后台 VAD / 波形 / 裁剪处理"
+                                } else {
+                                    "正在后台运行 Silero VAD 并生成裁剪版…"
+                                },
+                                color = EchoMuted,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        "FAILED" -> {
+                            Text("后处理失败；再次打开该记录会重新尝试。", color = Color(0xFFBE4757), fontSize = 12.sp)
+                        }
+                        "DONE" -> {
+                            Text(
+                                "Silero 后处理完成 · " + rangeList.size + " 个语音区间",
+                                color = Color(0xFF23846F),
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
                 }
             }
 
-            AudioPlayer(path = chunk.audioPath)
+            if (chunk.originalAvailable && File(chunk.audioPath).exists()) {
+                WaveformAudioPlayer(
+                    path = chunk.audioPath,
+                    waveform = waveform,
+                    ranges = rangeList,
+                    previewRequest = previewRequest,
+                )
+            } else if (!chunk.speechAudioPath.isNullOrBlank()) {
+                InfoPanel(
+                    "原始时间轴不可用",
+                    "原始素材已由你确认删除。下面仍可播放 VAD 裁剪版，但 VAD 区间保留的是原始录音时间坐标。",
+                )
+                SimpleAudioPlayer(path = chunk.speechAudioPath)
+            }
+
+            if (!chunk.speechAudioPath.isNullOrBlank() && File(chunk.speechAudioPath).exists()) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF4F7FF)),
+                    border = BorderStroke(1.dp, Color(0xFFDCE5FF)),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("VAD 裁剪版", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "保留语音区间，并自动加入 400 ms 前置和 500 ms 后置保护。裁剪后约 " +
+                                formatDuration(chunk.speechDurationMs) + "。",
+                            color = EchoMuted,
+                            fontSize = 12.sp,
+                        )
+                        SimpleAudioPlayer(path = chunk.speechAudioPath)
+                        if (chunk.originalAvailable) {
+                            OutlinedButton(onClick = { confirmDeleteOriginal = true }) {
+                                Icon(Icons.Outlined.DeleteSweep, null)
+                                Spacer(Modifier.width(7.dp))
+                                Text("删除原始素材…")
+                            }
+                        }
+                    }
+                }
+            }
 
             TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("对话原文") })
@@ -503,7 +622,7 @@ private fun RecordingDetailScreen(
                         if (state.chunkId == chunk.id) {
                             AssistChip(
                                 onClick = {},
-                                label = { Text("已写入 ${state.count} 段转写") },
+                                label = { Text("已写入 " + state.count + " 段转写") },
                                 leadingIcon = { Icon(Icons.Outlined.CheckCircle, null) },
                             )
                         }
@@ -516,14 +635,37 @@ private fun RecordingDetailScreen(
                     transcriptList.forEach { seg -> TranscriptCard(seg) }
                 }
             } else {
-                Text("检测到 ${rangeList.size} 段语音活动", color = EchoMuted, fontSize = 13.sp)
+                Text(
+                    "检测到 " + rangeList.size + " 段语音活动。点击任意区间，会从区间前 0.5 秒开始试听，并在区间后 0.5 秒自动暂停。",
+                    color = EchoMuted,
+                    fontSize = 13.sp,
+                )
+
                 if (rangeList.isEmpty()) {
-                    EmptyCard("这条录音没有已保存的 VAD 区间。")
+                    EmptyCard(
+                        if (chunk.postProcessState == "DONE") {
+                            "Silero 未在这条录音中检测到语音。"
+                        } else {
+                            "VAD 后处理尚未完成。"
+                        }
+                    )
                 } else {
                     rangeList.forEachIndexed { index, range ->
+                        val clickable = chunk.originalAvailable && File(chunk.audioPath).exists()
                         Card(
                             colors = CardDefaults.cardColors(containerColor = Color.White),
                             border = BorderStroke(1.dp, Color(0xFFE6EBF3)),
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = clickable) {
+                                        previewRequest =
+                                            VadPreviewRequest(
+                                                startMs = (range.startOffsetMs - 500L).coerceAtLeast(0L),
+                                                endMs = (range.endOffsetMs + 500L).coerceAtMost(chunk.durationMs),
+                                                token = System.nanoTime(),
+                                            )
+                                    },
                         ) {
                             Row(
                                 Modifier.fillMaxWidth().padding(15.dp),
@@ -531,23 +673,30 @@ private fun RecordingDetailScreen(
                             ) {
                                 Surface(color = Color(0xFFEDF1FF), shape = CircleShape) {
                                     Text(
-                                        "${index + 1}",
+                                        (index + 1).toString(),
                                         color = EchoBlue,
                                         modifier = Modifier.padding(8.dp),
                                     )
                                 }
                                 Spacer(Modifier.width(12.dp))
-                                Column {
+                                Column(Modifier.weight(1f)) {
                                     Text(
-                                        "${formatMs(range.startOffsetMs)} → ${formatMs(range.endOffsetMs)}",
+                                        formatMs(range.startOffsetMs) + " → " +
+                                            formatMs(range.endOffsetMs),
                                         fontWeight = FontWeight.Medium,
                                     )
                                     Text(
-                                        "speech · ${range.modelId ?: "VAD"} ${range.modelVersion ?: ""}",
+                                        "speech · " + (range.modelId ?: "VAD") + " " +
+                                            (range.modelVersion ?: ""),
                                         color = EchoMuted,
                                         fontSize = 12.sp,
                                     )
                                 }
+                                Icon(
+                                    Icons.Outlined.PlayCircle,
+                                    if (clickable) "试听该 VAD 区间" else null,
+                                    tint = if (clickable) EchoBlue else EchoMuted,
+                                )
                             }
                         }
                     }
@@ -556,6 +705,12 @@ private fun RecordingDetailScreen(
         }
     }
 }
+
+private data class VadPreviewRequest(
+    val startMs: Long,
+    val endMs: Long,
+    val token: Long,
+)
 
 @Composable
 private fun TranscriptCard(seg: TranscriptSegmentEntity) {
@@ -568,13 +723,13 @@ private fun TranscriptCard(seg: TranscriptSegmentEntity) {
             Row {
                 Text(formatMs(seg.startOffsetMs), color = EchoBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(8.dp))
-                Text("→ ${formatMs(seg.endOffsetMs)}", color = EchoMuted, fontSize = 12.sp)
+                Text("→ " + formatMs(seg.endOffsetMs), color = EchoMuted, fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
                 Text(seg.language.orEmpty(), color = EchoMuted, fontSize = 12.sp)
             }
             Text(seg.text, lineHeight = 23.sp)
             Text(
-                "${seg.modelId ?: "ASR"} ${seg.modelVersion ?: ""}".trim(),
+                ((seg.modelId ?: "ASR") + " " + (seg.modelVersion ?: "")).trim(),
                 color = EchoMuted,
                 fontSize = 11.sp,
             )
@@ -583,7 +738,197 @@ private fun TranscriptCard(seg: TranscriptSegmentEntity) {
 }
 
 @Composable
-private fun AudioPlayer(path: String) {
+private fun WaveformAudioPlayer(
+    path: String,
+    waveform: List<Float>,
+    ranges: List<AudioRangeEntity>,
+    previewRequest: VadPreviewRequest?,
+) {
+    val file = remember(path) { File(path) }
+    var prepared by remember(path) { mutableStateOf(false) }
+    var playing by remember(path) { mutableStateOf(false) }
+    var duration by remember(path) { mutableIntStateOf(1) }
+    var position by remember(path) { mutableIntStateOf(0) }
+    var previewEndMs by remember(path) { mutableStateOf<Int?>(null) }
+    val player = remember(path) { MediaPlayer() }
+
+    DisposableEffect(path) {
+        if (file.exists()) {
+            runCatching {
+                player.setDataSource(path)
+                player.prepare()
+                duration = player.duration.coerceAtLeast(1)
+                prepared = true
+                player.setOnCompletionListener {
+                    playing = false
+                    previewEndMs = null
+                    position = 0
+                    it.seekTo(0)
+                }
+            }
+        }
+        onDispose { runCatching { player.release() } }
+    }
+
+    LaunchedEffect(previewRequest?.token, prepared) {
+        val request = previewRequest
+        if (prepared && request != null) {
+            val start = request.startMs.coerceIn(0L, duration.toLong()).toInt()
+            val end = request.endMs.coerceIn(start.toLong(), duration.toLong()).toInt()
+            player.seekTo(start)
+            position = start
+            previewEndMs = end
+            player.start()
+            playing = true
+        }
+    }
+
+    LaunchedEffect(playing) {
+        while (playing) {
+            position = runCatching { player.currentPosition }.getOrDefault(position)
+            val end = previewEndMs
+            if (end != null && position >= end) {
+                runCatching { player.pause() }
+                playing = false
+                previewEndMs = null
+                position = end
+                break
+            }
+            delay(100)
+        }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFAFBFE)),
+        border = BorderStroke(1.dp, Color(0xFFE6EBF3)),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilledIconButton(
+                    onClick = {
+                        if (!prepared) return@FilledIconButton
+                        previewEndMs = null
+                        if (playing) player.pause() else player.start()
+                        playing = !playing
+                    },
+                    enabled = prepared,
+                ) {
+                    Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, null)
+                }
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text("原始波形时间轴", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (prepared) {
+                            formatMs(position.toLong()) + " / " + formatMs(duration.toLong())
+                        } else {
+                            "音频文件不可用"
+                        },
+                        color = EchoMuted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(116.dp),
+            ) {
+                Canvas(Modifier.fillMaxSize().padding(vertical = 12.dp)) {
+                    val total = duration.coerceAtLeast(1).toFloat()
+
+                    ranges.forEach { range ->
+                        val left = size.width * (range.startOffsetMs / total)
+                        val right = size.width * (range.endOffsetMs / total)
+                        drawRect(
+                            color = EchoBlue.copy(alpha = 0.13f),
+                            topLeft = Offset(left, 0f),
+                            size = Size((right - left).coerceAtLeast(1f), size.height),
+                        )
+                    }
+
+                    if (waveform.isNotEmpty()) {
+                        val bars =
+                            minOf(
+                                waveform.size,
+                                (size.width / 3f).toInt().coerceAtLeast(1),
+                            )
+                        val center = size.height / 2f
+                        for (bar in 0 until bars) {
+                            val from = bar * waveform.size / bars
+                            val to = ((bar + 1) * waveform.size / bars).coerceAtMost(waveform.size)
+                            var amplitude = 0f
+                            for (sample in from until to) {
+                                amplitude = maxOf(amplitude, waveform[sample])
+                            }
+                            val half = (amplitude.coerceAtLeast(0.04f) * size.height * 0.42f)
+                            val x = (bar + 0.5f) * size.width / bars
+                            drawLine(
+                                color = Color(0xFF71809B),
+                                start = Offset(x, center - half),
+                                end = Offset(x, center + half),
+                                strokeWidth = 2f,
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                    } else {
+                        drawLine(
+                            color = Color(0xFFD5DDEA),
+                            start = Offset(0f, size.height / 2f),
+                            end = Offset(size.width, size.height / 2f),
+                            strokeWidth = 2f,
+                        )
+                    }
+
+                    val playX = size.width * (position.coerceIn(0, duration).toFloat() / total)
+                    drawLine(
+                        color = EchoBlue,
+                        start = Offset(playX, 0f),
+                        end = Offset(playX, size.height),
+                        strokeWidth = 3f,
+                    )
+                }
+
+                Slider(
+                    value = position.coerceIn(0, duration).toFloat(),
+                    onValueChange = {
+                        previewEndMs = null
+                        position = it.toInt()
+                    },
+                    onValueChangeFinished = {
+                        if (prepared) player.seekTo(position)
+                    },
+                    valueRange = 0f..duration.coerceAtLeast(1).toFloat(),
+                    colors =
+                        SliderDefaults.colors(
+                            thumbColor = EchoBlue,
+                            activeTrackColor = Color.Transparent,
+                            inactiveTrackColor = Color.Transparent,
+                            activeTickColor = Color.Transparent,
+                            inactiveTickColor = Color.Transparent,
+                        ),
+                    modifier = Modifier.fillMaxWidth().align(Alignment.Center),
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    color = EchoBlue.copy(alpha = 0.13f),
+                    shape = RoundedCornerShape(4.dp),
+                    modifier = Modifier.size(width = 22.dp, height = 10.dp),
+                ) {}
+                Spacer(Modifier.width(7.dp))
+                Text("蓝色背景 = Silero VAD speech", color = EchoMuted, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SimpleAudioPlayer(path: String?) {
+    if (path.isNullOrBlank()) return
+
     val file = remember(path) { File(path) }
     var prepared by remember(path) { mutableStateOf(false) }
     var playing by remember(path) { mutableStateOf(false) }
@@ -611,46 +956,34 @@ private fun AudioPlayer(path: String) {
     LaunchedEffect(playing) {
         while (playing) {
             position = runCatching { player.currentPosition }.getOrDefault(position)
-            delay(250)
+            delay(200)
         }
     }
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFFAFBFE)),
-        border = BorderStroke(1.dp, Color(0xFFE6EBF3)),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                FilledIconButton(
-                    onClick = {
-                        if (!prepared) return@FilledIconButton
-                        if (playing) player.pause() else player.start()
-                        playing = !playing
-                    },
-                    enabled = prepared,
-                ) {
-                    Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, null)
-                }
-                Spacer(Modifier.width(10.dp))
-                Slider(
-                    value = position.toFloat().coerceIn(0f, duration.toFloat()),
-                    onValueChange = { position = it.toInt() },
-                    onValueChangeFinished = { if (prepared) player.seekTo(position) },
-                    valueRange = 0f..duration.toFloat(),
-                    modifier = Modifier.weight(1f),
-                )
-            }
-            Text(
-                if (prepared) {
-                    "${formatMs(position.toLong())} / ${formatMs(duration.toLong())}"
-                } else {
-                    "音频文件不可用"
-                },
-                color = EchoMuted,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(start = 58.dp),
-            )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(
+            onClick = {
+                if (!prepared) return@IconButton
+                if (playing) player.pause() else player.start()
+                playing = !playing
+            },
+            enabled = prepared,
+        ) {
+            Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, null)
         }
+        Slider(
+            value = position.coerceIn(0, duration).toFloat(),
+            onValueChange = { position = it.toInt() },
+            onValueChangeFinished = { if (prepared) player.seekTo(position) },
+            valueRange = 0f..duration.coerceAtLeast(1).toFloat(),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            formatMs(position.toLong()) + " / " + formatMs(duration.toLong()),
+            color = EchoMuted,
+            fontSize = 11.sp,
+        )
     }
 }
 
@@ -772,22 +1105,66 @@ private fun ConnectScreen(
 @Composable
 private fun SettingsScreen(
     settings: EchoSettings,
+    chunks: List<AudioChunkEntity>,
     onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
     onVadThreshold: (Float) -> Unit,
+    onCleanupRetentionDays: (Int) -> Unit,
+    onDeleteOriginals: (List<AudioChunkEntity>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val cutoff =
+        System.currentTimeMillis() -
+            settings.cleanupRetentionDays.toLong() * 24L * 60L * 60L * 1000L
+    val cleanupCandidates =
+        chunks.filter {
+            it.originalAvailable &&
+                it.state == "UPLOADED" &&
+                it.postProcessState == "DONE" &&
+                !it.speechAudioPath.isNullOrBlank() &&
+                it.endTimeUtcMs < cutoff
+        }
+    var confirmCleanup by remember { mutableStateOf(false) }
+
+    if (confirmCleanup) {
+        AlertDialog(
+            onDismissRequest = { confirmCleanup = false },
+            icon = { Icon(Icons.Outlined.DeleteSweep, null) },
+            title = { Text("删除 " + cleanupCandidates.size + " 个原始录音？") },
+            text = {
+                Text(
+                    "这些记录已经同步到电脑、完成 VAD 裁剪，并超过保留天数。只会删除手机上的原始 M4A；裁剪版、波形、VAD 和转写继续保留。此操作需要你本次明确确认。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteOriginals(cleanupCandidates)
+                        confirmCleanup = false
+                    },
+                ) { Text("确认删除原素材", color = Color(0xFFBE4757)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmCleanup = false }) { Text("取消") }
+            },
+        )
+    }
+
     Page(
         title = "录音设置",
-        subtitle = "按照实际环境调整记录与同步行为。",
+        subtitle = "按照实际环境调整记录、后处理与存储策略。",
         modifier = modifier,
     ) {
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("Silero 阈值只影响 VAD 标记，不会停止原始音频录制。", color = EchoMuted, fontSize = 13.sp)
                 Text(
-                    "阈值 ${"%.3f".format(settings.vadThreshold)}",
+                    "Silero 不再常驻录音主循环；每个 chunk 完成后后台运行，并同时生成波形与语音裁剪版。",
+                    color = EchoMuted,
+                    fontSize = 13.sp,
+                )
+                Text(
+                    "阈值 " + "%.3f".format(settings.vadThreshold),
                     color = EchoBlue,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -797,7 +1174,7 @@ private fun SettingsScreen(
                     valueRange = 0.10f..0.90f,
                 )
                 Text(
-                    "Silero 默认 0.50；越低越敏感，越高越保守。新设置从下一次录音开始生效。",
+                    "Silero 默认 0.50；越低越敏感，越高越保守。修改后用于新完成的 chunk。",
                     color = EchoMuted,
                     fontSize = 12.sp,
                 )
@@ -816,9 +1193,45 @@ private fun SettingsScreen(
             settings.autoResume,
             onAutoResume,
         )
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("原始素材清理", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "系统只自动识别清理候选，不会自动删除。候选必须同时满足：已同步 PC、VAD 裁剪完成、原始文件仍存在、超过保留天数。",
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+                Text(
+                    "原始录音至少保留 " + settings.cleanupRetentionDays + " 天",
+                    fontWeight = FontWeight.Medium,
+                )
+                Slider(
+                    value = settings.cleanupRetentionDays.toFloat(),
+                    onValueChange = { onCleanupRetentionDays(it.toInt()) },
+                    valueRange = 1f..30f,
+                    steps = 28,
+                )
+                Text(
+                    "当前有 " + cleanupCandidates.size + " 个原始文件符合清理条件。",
+                    color = if (cleanupCandidates.isEmpty()) EchoMuted else Color(0xFFAC7B2C),
+                    fontSize = 12.sp,
+                )
+                Button(
+                    onClick = { confirmCleanup = true },
+                    enabled = cleanupCandidates.isNotEmpty(),
+                ) {
+                    Icon(Icons.Outlined.DeleteSweep, null)
+                    Spacer(Modifier.width(7.dp))
+                    Text("审查并删除候选原素材")
+                }
+            }
+        }
+
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；sherpa-onnx Silero VAD 使用 512-sample window；每 10 分钟滚动一个 chunk。",
+            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行 sherpa-onnx Silero VAD。",
         )
     }
 }
