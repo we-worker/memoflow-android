@@ -6,10 +6,13 @@ import android.media.MediaMetadataRetriever
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.memoflow.asr.AliyunQwenAsrEngine
+import com.memoflow.asr.DoubaoArkAsrEngine
 import com.memoflow.data.AudioChunkEntity
 import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioFrame
+import com.memoflow.domain.AudioReference
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
 import com.memoflow.service.BootReceiver
@@ -17,8 +20,12 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -187,6 +194,96 @@ class CoreInstrumentedTest {
     }
 
     @Test
+    fun aliyunCloudAsrSendsBase64AudioAndParsesText() = runBlocking {
+        val source = createTestM4a("aliyun-cloud-asr-test")
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"choices\":[{\"message\":{\"content\":\"阿里云模拟转写\"}}]}"),
+        )
+        server.start()
+
+        try {
+            val engine =
+                AliyunQwenAsrEngine(
+                    apiKey = "test-key",
+                    endpoint = server.url("/compatible-mode/v1/chat/completions").toString(),
+                    client = OkHttpClient(),
+                )
+            val result =
+                engine.transcribe(
+                    AudioReference(
+                        chunkId = "aliyun-test",
+                        startMs = 0,
+                        endMs = 2_000,
+                        audioPath = source.absolutePath,
+                    ),
+                )
+
+            assertEquals(1, result.size)
+            assertEquals("阿里云模拟转写", result.single().text)
+
+            val request = server.takeRequest()
+            assertEquals("Bearer test-key", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"model\":\"qwen3-asr-flash\""))
+            assertTrue(body.contains("data:audio/mp4;base64,"))
+            assertTrue(body.contains("\"enable_itn\":true"))
+        } finally {
+            server.shutdown()
+            source.delete()
+        }
+        Unit
+    }
+
+    @Test
+    fun doubaoCloudAsrSendsInputAudioAndParsesText() = runBlocking {
+        val source = createTestM4a("doubao-cloud-asr-test")
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"choices\":[{\"message\":{\"content\":\"豆包模拟转写\"}}]}"),
+        )
+        server.start()
+
+        try {
+            val engine =
+                DoubaoArkAsrEngine(
+                    apiKey = "ark-test-key",
+                    model = "doubao-audio-test",
+                    endpoint = server.url("/api/v3/chat/completions").toString(),
+                    client = OkHttpClient(),
+                )
+            val result =
+                engine.transcribe(
+                    AudioReference(
+                        chunkId = "doubao-test",
+                        startMs = 0,
+                        endMs = 2_000,
+                        audioPath = source.absolutePath,
+                    ),
+                )
+
+            assertEquals(1, result.size)
+            assertEquals("豆包模拟转写", result.single().text)
+
+            val request = server.takeRequest()
+            assertEquals("Bearer ark-test-key", request.getHeader("Authorization"))
+            val body = request.body.readUtf8()
+            assertTrue(body.contains("\"type\":\"input_audio\""))
+            assertTrue(body.contains("\"format\":\"audio/mp4\""))
+            assertTrue(body.contains("\"model\":\"doubao-audio-test\""))
+            assertFalse(body.contains("ark-test-key"))
+        } finally {
+            server.shutdown()
+            source.delete()
+        }
+        Unit
+    }
+
+    @Test
     fun sherpaSileroVadLoadsModelAndAcceptsPcm() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val clazz =
@@ -229,6 +326,38 @@ class CoreInstrumentedTest {
         BootReceiver().onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
 
         assertTrue(prefs.getBoolean(BootReceiver.KEY_RESUME_REQUESTED, false))
+    }
+
+    private suspend fun createTestM4a(name: String): File {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val outputDir = File(context.cacheDir, name).apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val encoder = AacMediaCodecEncoder()
+        val writer = M4aChunkWriter(outputDir)
+        writer.start()
+        encoder.open(sampleRate = 16000, channels = 1, bitrate = 24000)
+        try {
+            repeat(20) { index ->
+                val frame =
+                    AudioFrame(
+                        pcm = sineLikePcm(index),
+                        timestampNs = index * 100_000_000L,
+                        sampleRate = 16000,
+                        channels = 1,
+                    )
+                val encoded = encoder.encode(frame)
+                encoder.outputFormat?.let(writer::onFormat)
+                encoded.forEach(writer::write)
+            }
+            val tail = encoder.flush()
+            encoder.outputFormat?.let(writer::onFormat)
+            tail.forEach(writer::write)
+        } finally {
+            encoder.close()
+        }
+        return File(requireNotNull(writer.finish()).audioPath)
     }
 
     private fun sineLikePcm(frameIndex: Int): ByteArray {
