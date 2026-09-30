@@ -183,6 +183,7 @@ class CoreInstrumentedTest {
         File(chunk.audioPath).delete()
         processed!!.speechAudioPath?.let { File(it).delete() }
         processed!!.waveformPath?.let { File(it).delete() }
+        Unit
     }
 
     @Test
