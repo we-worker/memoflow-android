@@ -1,8 +1,49 @@
+import java.net.URI
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+}
+
+val sherpaVersion = "1.13.8"
+val sileroVadUrl =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+val sileroVadSha256 =
+    "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
+val generatedVadAssetsDir = layout.buildDirectory.dir("generated/silero-vad-assets")
+
+fun sha256(bytes: ByteArray): String =
+    MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
+val downloadSileroVad by tasks.registering {
+    val output = generatedVadAssetsDir.map { it.file("silero_vad.onnx") }
+    outputs.file(output)
+
+    doLast {
+        val file = output.get().asFile
+        if (file.exists() && sha256(file.readBytes()) == sileroVadSha256) {
+            return@doLast
+        }
+
+        file.parentFile.mkdirs()
+        val connection =
+            URI(sileroVadUrl).toURL().openConnection().apply {
+                connectTimeout = 20_000
+                readTimeout = 60_000
+                setRequestProperty("User-Agent", "MemoFlow-Android-Build")
+            }
+        val bytes = connection.getInputStream().use { it.readBytes() }
+        val actual = sha256(bytes)
+        check(actual == sileroVadSha256) {
+            "silero_vad.onnx SHA-256 mismatch: expected " + sileroVadSha256 + ", got " + actual
+        }
+        file.writeBytes(bytes)
+    }
 }
 
 android {
@@ -13,8 +54,8 @@ android {
         applicationId = "com.memoflow"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-demo"
+        versionCode = 3
+        versionName = "0.3.0-demo"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -23,9 +64,15 @@ android {
         buildConfig = true
     }
 
+    sourceSets["main"].assets.srcDir(generatedVadAssetsDir)
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(downloadSileroVad)
 }
 
 kotlin { jvmToolchain(17) }
@@ -47,6 +94,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    implementation("com.k2fsa:sherpa-onnx:" + sherpaVersion + "@aar")
 
     testImplementation("junit:junit:4.13.2")
 
