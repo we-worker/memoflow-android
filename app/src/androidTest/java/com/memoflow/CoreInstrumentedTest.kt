@@ -12,7 +12,6 @@ import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioFrame
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
-import com.memoflow.processing.AudioPostProcessWorker
 import com.memoflow.service.BootReceiver
 import java.io.File
 import kotlinx.coroutines.delay
@@ -158,12 +157,17 @@ class CoreInstrumentedTest {
         val entity = chunk!!.toEntity()
         db.chunks().upsert(entity)
 
-        AudioPostProcessWorker.enqueue(context, chunk.id)
+        val workerClass =
+            Class.forName("com.memoflow.processing.AudioPostProcessWorker")
+        val companion = workerClass.getDeclaredField("Companion").get(null)
+        companion.javaClass
+            .getMethod("enqueue", Context::class.java, String::class.java)
+            .invoke(companion, context, chunk.id)
 
         var processed = db.chunks().getChunk(chunk.id)
-        repeat(120) {
+        for (attempt in 0 until 120) {
             if (processed?.postProcessState == "DONE" || processed?.postProcessState == "FAILED") {
-                return@repeat
+                break
             }
             delay(250)
             processed = db.chunks().getChunk(chunk.id)
