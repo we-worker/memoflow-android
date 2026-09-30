@@ -170,15 +170,12 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val sourcePath =
-            if (chunk.originalAvailable && File(chunk.audioPath).exists()) {
-                chunk.audioPath
-            } else {
-                chunk.speechAudioPath
-            }
-
-        if (sourcePath.isNullOrBlank() || !File(sourcePath).exists()) {
-            _asrState.value = AsrUiState.Error(chunk.id, "没有可用于转写的音频文件")
+        if (!chunk.originalAvailable || !File(chunk.audioPath).exists()) {
+            _asrState.value =
+                AsrUiState.Error(
+                    chunk.id,
+                    "原始素材已删除，不能重新生成带原始时间坐标的 ASR；已有转写结果仍会保留",
+                )
             return
         }
 
@@ -189,13 +186,8 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                     AudioReference(
                         chunkId = chunk.id,
                         startMs = 0,
-                        endMs =
-                            if (sourcePath == chunk.audioPath) {
-                                chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                            } else {
-                                chunk.speechDurationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                            },
-                        audioPath = sourcePath,
+                        endMs = chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        audioPath = chunk.audioPath,
                     ),
                 )
             }.onSuccess { segments ->
