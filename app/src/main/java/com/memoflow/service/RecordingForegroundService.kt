@@ -186,8 +186,12 @@ class RecordingForegroundService : Service() {
         const val PREFS_RECORDING = "recording"
         const val KEY_RECORDING_ACTIVE = "recording_active"
         const val KEY_RECORDING_STARTED_AT = "recording_started_at"
+        const val KEY_VAD_ENGINE = "vad_engine"
+        const val DEFAULT_VAD_ENGINE = "SILERO"
         const val KEY_SILERO_THRESHOLD = "silero_vad_threshold"
         const val DEFAULT_SILERO_THRESHOLD = 0.5f
+        const val KEY_FIRERED_THRESHOLD = "firered_vad_threshold"
+        const val DEFAULT_FIRERED_THRESHOLD = 0.4f
         const val KEY_VAD_SEGMENT_GAP_MINUTES = "vad_segment_gap_minutes"
         const val DEFAULT_VAD_SEGMENT_GAP_MINUTES = 5
 
