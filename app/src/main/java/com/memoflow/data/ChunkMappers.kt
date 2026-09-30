@@ -6,21 +6,23 @@ import com.memoflow.domain.TranscriptSegment
 
 fun AudioChunk.toEntity() =
     AudioChunkEntity(
-        id,
-        deviceId,
-        startTimeUtcMs,
-        endTimeUtcMs,
-        durationMs,
-        audioPath,
-        codec,
-        container,
-        sampleRate,
-        channels,
-        bitrate,
-        fileSize,
-        checksumSha256,
-        state.name,
-        schemaVersion,
+        id = id,
+        deviceId = deviceId,
+        startTimeUtcMs = startTimeUtcMs,
+        endTimeUtcMs = endTimeUtcMs,
+        durationMs = durationMs,
+        audioPath = audioPath,
+        codec = codec,
+        container = container,
+        sampleRate = sampleRate,
+        channels = channels,
+        bitrate = bitrate,
+        fileSize = fileSize,
+        checksumSha256 = checksumSha256,
+        state = state.name,
+        schemaVersion = schemaVersion,
+        postProcessState = "PENDING",
+        originalAvailable = true,
     )
 
 fun AudioRange.toEntity(id: String) =
