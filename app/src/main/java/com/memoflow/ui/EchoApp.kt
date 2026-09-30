@@ -154,6 +154,7 @@ fun EchoApp(
                             onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
                             onVadThreshold = viewModel::setVadThreshold,
+                            onVadSegmentGapMinutes = viewModel::setVadSegmentGapMinutes,
                             onCleanupRetentionDays = viewModel::setCleanupRetentionDays,
                             onDeleteOriginals = viewModel::deleteOriginals,
                             modifier = Modifier.padding(padding),
@@ -527,7 +528,7 @@ private fun RecordingDetailScreen(
                         }
                         "DONE" -> {
                             Text(
-                                "Silero 后处理完成 · " + rangeList.size + " 个语音区间",
+                                "Silero 后处理完成 · " + rangeList.size + " 个会话段",
                                 color = Color(0xFF23846F),
                                 fontSize = 12.sp,
                             )
@@ -578,7 +579,7 @@ private fun RecordingDetailScreen(
 
             TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("对话原文") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("VAD 区间") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("会话段") })
             }
 
             if (tab == 0) {
@@ -636,7 +637,7 @@ private fun RecordingDetailScreen(
                 }
             } else {
                 Text(
-                    "检测到 " + rangeList.size + " 段语音活动。点击任意区间，会从区间前 0.5 秒开始试听，并在区间后 0.5 秒自动暂停。",
+                    "整理为 " + rangeList.size + " 个会话段。只有连续静音达到设置的分段间隔才会开始新段；点击任意会话段可直接试听验证。",
                     color = EchoMuted,
                     fontSize = 13.sp,
                 )
@@ -686,7 +687,7 @@ private fun RecordingDetailScreen(
                                         fontWeight = FontWeight.Medium,
                                     )
                                     Text(
-                                        "speech · " + (range.modelId ?: "VAD") + " " +
+                                        "会话段 · " + (range.modelId ?: "VAD") + " " +
                                             (range.modelVersion ?: ""),
                                         color = EchoMuted,
                                         fontSize = 12.sp,
@@ -1109,6 +1110,7 @@ private fun SettingsScreen(
     onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
     onVadThreshold: (Float) -> Unit,
+    onVadSegmentGapMinutes: (Int) -> Unit,
     onCleanupRetentionDays: (Int) -> Unit,
     onDeleteOriginals: (List<AudioChunkEntity>) -> Unit,
     modifier: Modifier = Modifier,
@@ -1174,9 +1176,27 @@ private fun SettingsScreen(
                     valueRange = 0.10f..0.90f,
                 )
                 Text(
-                    "Silero 默认 0.50；越低越敏感，越高越保守。修改后用于新完成的 chunk。",
+                    "Silero 默认 0.50；越低越敏感，越高越保守。修改后，已有原始录音会标记为待重算；重新进入详情时自动重新 VAD。",
                     color = EchoMuted,
                     fontSize = 12.sp,
+                )
+                HorizontalDivider(color = Color(0xFFE9EDF5))
+                Text(
+                    "连续静音达到 " + settings.vadSegmentGapMinutes + " 分钟才开始新的一段",
+                    color = EchoBlue,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Slider(
+                    value = settings.vadSegmentGapMinutes.toFloat(),
+                    onValueChange = { onVadSegmentGapMinutes(it.toInt()) },
+                    valueRange = 1f..10f,
+                    steps = 8,
+                )
+                Text(
+                    "默认 5 分钟。小于这个时长的停顿会保留在同一个会话段内，例如停顿 10 秒不会再拆成两段。修改后同样会让旧 VAD 结果在下次进入详情时重算。",
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
                 )
             }
         }
