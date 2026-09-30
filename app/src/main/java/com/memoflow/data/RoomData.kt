@@ -26,6 +26,8 @@ data class AudioChunkEntity(
     val waveformPath: String? = null,
     val postProcessState: String = "PENDING",
     val originalAvailable: Boolean = true,
+    val appliedVadThreshold: Float = -1f,
+    val appliedVadMergeSilenceMs: Long = -1L,
 )
 
 @Entity(tableName = "audio_ranges", primaryKeys = ["chunkId", "startOffsetMs", "endOffsetMs"])
@@ -110,10 +112,21 @@ interface ChunkDao {
 
     @Query("""
         UPDATE audio_chunks
+        SET postProcessState = 'STALE',
+            state = CASE WHEN state = 'UPLOADED' THEN 'COMPLETE' ELSE state END
+        WHERE originalAvailable = 1
+          AND postProcessState = 'DONE'
+    """)
+    suspend fun markPostProcessStale()
+
+    @Query("""
+        UPDATE audio_chunks
         SET speechAudioPath = :speechAudioPath,
             speechDurationMs = :speechDurationMs,
             waveformPath = :waveformPath,
-            postProcessState = :state
+            postProcessState = :state,
+            appliedVadThreshold = :appliedVadThreshold,
+            appliedVadMergeSilenceMs = :appliedVadMergeSilenceMs
         WHERE id = :id
     """)
     suspend fun updatePostProcessResult(
@@ -122,6 +135,8 @@ interface ChunkDao {
         speechDurationMs: Long,
         waveformPath: String?,
         state: String,
+        appliedVadThreshold: Float,
+        appliedVadMergeSilenceMs: Long,
     )
 
     @Query("UPDATE audio_chunks SET originalAvailable = 0 WHERE id = :id")
@@ -158,7 +173,7 @@ interface ChunkDao {
 
 @Database(
     entities = [AudioChunkEntity::class, AudioRangeEntity::class, TranscriptSegmentEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class MemoDatabase : RoomDatabase() {

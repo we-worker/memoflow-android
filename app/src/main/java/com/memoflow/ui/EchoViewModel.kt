@@ -26,6 +26,7 @@ data class EchoSettings(
     val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+    val vadSegmentGapMinutes: Int = RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
     val cleanupRetentionDays: Int = 7,
 )
 
@@ -68,8 +69,16 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun ensurePostProcessed(chunk: AudioChunkEntity) {
         if (!chunk.originalAvailable) return
-        if (chunk.postProcessState == "DONE" || chunk.postProcessState == "PROCESSING") return
         if (!File(chunk.audioPath).exists()) return
+        if (chunk.postProcessState == "PROCESSING") return
+
+        val current = settings.value
+        val desiredGapMs = current.vadSegmentGapMinutes * 60_000L
+        val parametersMatch =
+            kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
+                chunk.appliedVadMergeSilenceMs == desiredGapMs
+
+        if (chunk.postProcessState == "DONE" && parametersMatch) return
         AudioPostProcessWorker.enqueue(getApplication(), chunk.id)
     }
 
@@ -107,6 +116,16 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             .putFloat(RecordingForegroundService.KEY_SILERO_THRESHOLD, safe)
             .apply()
         _settings.value = _settings.value.copy(vadThreshold = safe)
+        viewModelScope.launch { dao.markPostProcessStale() }
+    }
+
+    fun setVadSegmentGapMinutes(minutes: Int) {
+        val safe = minutes.coerceIn(1, 10)
+        recordingPrefs.edit()
+            .putInt(RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES, safe)
+            .apply()
+        _settings.value = _settings.value.copy(vadSegmentGapMinutes = safe)
+        viewModelScope.launch { dao.markPostProcessStale() }
     }
 
     fun setCleanupRetentionDays(days: Int) {
@@ -241,6 +260,11 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                     RecordingForegroundService.KEY_SILERO_THRESHOLD,
                     RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
                 ).coerceIn(0.05f, 0.95f),
+            vadSegmentGapMinutes =
+                recordingPrefs.getInt(
+                    RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
+                    RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
+                ).coerceIn(1, 10),
             cleanupRetentionDays =
                 recordingPrefs.getInt(KEY_CLEANUP_RETENTION_DAYS, 7).coerceIn(1, 30),
         )

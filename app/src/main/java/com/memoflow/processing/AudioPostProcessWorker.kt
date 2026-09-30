@@ -50,16 +50,21 @@ class AudioPostProcessWorker(
             File(applicationContext.filesDir, "waveforms/" + chunkId + ".waveform")
 
         try {
+            val prefs =
+                applicationContext.getSharedPreferences(
+                    RecordingForegroundService.PREFS_RECORDING,
+                    Context.MODE_PRIVATE,
+                )
             val threshold =
-                applicationContext
-                    .getSharedPreferences(
-                        RecordingForegroundService.PREFS_RECORDING,
-                        Context.MODE_PRIVATE,
-                    )
-                    .getFloat(
-                        RecordingForegroundService.KEY_SILERO_THRESHOLD,
-                        RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
-                    )
+                prefs.getFloat(
+                    RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                    RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                )
+            val mergeSilenceMs =
+                prefs.getInt(
+                    RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
+                    RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
+                ).coerceIn(1, 10) * 60_000L
 
             val analysis =
                 decodeAnalyze(
@@ -68,23 +73,34 @@ class AudioPostProcessWorker(
                     waveformFile = waveformFile,
                     threshold = threshold,
                 )
-
-            dao.replaceRanges(chunkId, analysis.ranges.map { it.toEntity(chunkId) })
+            val sessions =
+                groupVadSessions(
+                    ranges = analysis.ranges,
+                    mergeSilenceMs = mergeSilenceMs,
+                    durationMs = chunk.durationMs,
+                )
 
             val speech =
                 buildSpeechOnlyAudio(
                     chunkId = chunkId,
                     pcmFile = pcmFile,
-                    ranges = analysis.ranges,
+                    ranges = sessions,
                     originalDurationMs = chunk.durationMs,
                 )
 
+            if (speech == null) {
+                chunk.speechAudioPath?.let { File(it).delete() }
+            }
+
+            dao.replaceRanges(chunkId, sessions.map { it.toEntity(chunkId) })
             dao.updatePostProcessResult(
                 id = chunkId,
                 speechAudioPath = speech?.file?.absolutePath,
                 speechDurationMs = speech?.durationMs ?: 0L,
                 waveformPath = waveformFile.absolutePath,
                 state = "DONE",
+                appliedVadThreshold = threshold,
+                appliedVadMergeSilenceMs = mergeSilenceMs,
             )
 
             Result.success(

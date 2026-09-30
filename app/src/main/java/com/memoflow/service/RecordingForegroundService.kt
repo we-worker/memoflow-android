@@ -188,6 +188,8 @@ class RecordingForegroundService : Service() {
         const val KEY_RECORDING_STARTED_AT = "recording_started_at"
         const val KEY_SILERO_THRESHOLD = "silero_vad_threshold"
         const val DEFAULT_SILERO_THRESHOLD = 0.5f
+        const val KEY_VAD_SEGMENT_GAP_MINUTES = "vad_segment_gap_minutes"
+        const val DEFAULT_VAD_SEGMENT_GAP_MINUTES = 5
 
         private const val NOTIFICATION_ID = 7
         private const val SAMPLE_RATE = 16000
