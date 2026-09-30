@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memoflow.asr.*
 import com.memoflow.data.*
+import com.memoflow.vad.VadBackend
 import java.io.File
 import java.time.*
 import java.time.format.DateTimeFormatter
@@ -178,6 +179,7 @@ fun EchoApp(
                             chunks = chunks,
                             onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
+                            onVadBackend = viewModel::setVadBackend,
                             onVadThreshold = viewModel::setVadThreshold,
                             onVadSegmentGapMinutes = viewModel::setVadSegmentGapMinutes,
                             onCleanupRetentionDays = viewModel::setCleanupRetentionDays,
@@ -562,7 +564,8 @@ private fun RecordingDetailScreen(
                         }
                         "DONE" -> {
                             Text(
-                                "Silero 后处理完成 · " + rangeList.size + " 个会话段",
+                                (rangeList.firstOrNull()?.modelId ?: chunk.appliedVadEngine.ifBlank { "VAD" }) +
+                                    " 后处理完成 · " + rangeList.size + " 个会话段",
                                 color = Color(0xFF23846F),
                                 fontSize = 12.sp,
                             )
@@ -1145,6 +1148,7 @@ private fun SettingsScreen(
     chunks: List<AudioChunkEntity>,
     onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
+    onVadBackend: (VadBackend) -> Unit,
     onVadThreshold: (Float) -> Unit,
     onVadSegmentGapMinutes: (Int) -> Unit,
     onCleanupRetentionDays: (Int) -> Unit,
@@ -1206,12 +1210,33 @@ private fun SettingsScreen(
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Silero 不再常驻录音主循环；每个 chunk 完成后后台运行，并同时生成波形与语音裁剪版。",
+                    "VAD 只在 chunk 完成后运行。可以在同一条原始录音上切换不同模型重新分析，直接比较波形 overlay 和会话段。",
                     color = EchoMuted,
                     fontSize = 13.sp,
+                    lineHeight = 19.sp,
                 )
+
+                Text("VAD 引擎", fontWeight = FontWeight.Medium)
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    VadBackend.entries.forEach { backend ->
+                        FilterChip(
+                            selected = settings.vadBackend == backend,
+                            onClick = { onVadBackend(backend) },
+                            label = { Text(backend.displayName) },
+                        )
+                    }
+                }
                 Text(
-                    "阈值 " + "%.3f".format(settings.vadThreshold),
+                    settings.vadBackend.description,
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                )
+
+                Text(
+                    "触发阈值 " + "%.3f".format(settings.vadThreshold),
                     color = EchoBlue,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1221,9 +1246,17 @@ private fun SettingsScreen(
                     valueRange = 0.10f..0.90f,
                 )
                 Text(
-                    "Silero 默认 0.50；越低越敏感，越高越保守。修改后，已有原始录音会标记为待重算；重新进入详情时自动重新 VAD。",
+                    when (settings.vadBackend) {
+                        VadBackend.SILERO ->
+                            "Silero 推荐从 0.50 开始；越低越敏感。"
+                        VadBackend.FIRERED_NON_STREAM ->
+                            "FireRedVAD 官方示例常用 0.40；非流式模型会一次分析完整 chunk。"
+                        VadBackend.FIRERED_STREAM ->
+                            "FireRed Stream-VAD 推荐从 0.40 附近开始；模型按 10 ms 帧维护上下文。"
+                    } + " 修改引擎或阈值后，已有原始录音会标记为待重算；重新进入详情时自动重新 VAD。",
                     color = EchoMuted,
                     fontSize = 12.sp,
+                    lineHeight = 18.sp,
                 )
                 HorizontalDivider(color = Color(0xFFE9EDF5))
                 Text(
@@ -1310,7 +1343,7 @@ private fun SettingsScreen(
 
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行 sherpa-onnx Silero VAD。",
+            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行当前选择的 VAD 引擎。",
         )
     }
 }
