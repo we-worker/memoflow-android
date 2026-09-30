@@ -1,36 +1,92 @@
-# MemoFlow Android V1
+# MemoFlow / 回声 Android Demo
 
-原生 Kotlin + Jetpack Compose 的录音基础工程，按原型和技术路线实现：
+当前主链路：
 
-- Android `microphone` Foreground Service，异常时 `START_STICKY`
-- `AudioRecord` 采集 16 kHz/mono PCM16
-- PCM 同时进入 AAC 编码和本地 VAD（能量 VAD，接口可替换为 sherpa-onnx Silero）
-- 10 分钟滚动 M4A 以及 `.part` 崩溃恢复边界
-- Room 数据库实体：`AudioChunk`、`AudioRange`
-- ASR 通过 PC FastAPI 接口，`AsrEngine` 预留 faster-whisper / sherpa-onnx 实现
+`AudioRecord -> AAC-LC/M4A -> sherpa-onnx Silero VAD -> Room -> LAN sync -> PC ASR`
 
-## 构建
+## Android 端
 
-使用 Android Studio Hedgehog+、JDK 17、Android SDK 35 打开目录。真机需要 Android 10+，首次启动授予麦克风权限。录音文件位于 app 私有目录 `files/audio`。
+- Android microphone Foreground Service
+- 16 kHz / mono / PCM16 连续采集
+- AAC-LC 24 kbps，10 分钟滚动 M4A
+- **sherpa-onnx v1.13.8 + Silero VAD**
+- VAD 只标记语音区间，不裁掉原始录音
+- Room 保存 `AudioChunk`、`AudioRange`、`TranscriptSegment`
+- 历史录音可真实回放，可查看 VAD 区间和 PC ASR 结果
 
-## PC ASR
+### Silero VAD 依赖
+
+构建时从 sherpa-onnx 官方 GitHub Release 获取：
+
+- `sherpa-onnx-1.13.8.aar`
+- `silero_vad.onnx`
+
+模型 SHA-256 固定为：
+
+`9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`
+
+因此仓库不直接提交大体积 AAR 和模型；Gradle 构建会自动拉取并校验模型。
+
+## 局域网同步 + 固定密钥
+
+Demo 的安全边界：
+
+1. PC 和手机位于同一个可信局域网。
+2. PC 配置一个足够长的固定密钥。
+3. 手机“电脑与 MCP”页面填写 PC 地址和同一个密钥。
+4. `/health`、`/audio`、`/asr`、`/chunks` 都要求 `X-MemoFlow-Key`。
+5. PC 用常量时间比较校验密钥；PC 未配置密钥时默认拒绝访问。
+
+> 当前方案是局域网 HTTP + PSK，适合个人 Demo。不要把 8787 端口暴露到公网。
+
+### PC 启动：Linux / macOS
 
 ```bash
-cd pc_server
-python -m venv .venv && . .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install fastapi uvicorn python-multipart faster-whisper
-uvicorn main:app --host 0.0.0.0 --port 8787
+
+export MEMOFLOW_API_KEY='请替换成至少 24~32 位随机字符串'
+export MEMOFLOW_AUDIO_ROOT='./audio'
+uvicorn pc_server.main:app --host 0.0.0.0 --port 8787
 ```
 
-默认使用 `faster-whisper`；未安装或模型不可用时服务仍会启动并返回占位状态。Android 通过 multipart `/asr` 上传 M4A，并获得带 chunk offset 的 TranscriptSegment。
+### PC 启动：Windows PowerShell
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi uvicorn python-multipart faster-whisper
+
+$env:MEMOFLOW_API_KEY = "请替换成至少 24~32 位随机字符串"
+$env:MEMOFLOW_AUDIO_ROOT = ".\audio"
+uvicorn pc_server.main:app --host 0.0.0.0 --port 8787
+```
+
+手机端服务器地址示例：
+
+`http://192.168.1.10:8787`
+
+同步后 PC 目录会得到：
+
+```text
+audio/
+  <chunk-id>.m4a
+  <chunk-id>.json
+```
+
+JSON 中包含 chunk 元数据以及 Silero VAD 的 `speechRanges`。PC 的 `GET /chunks` 可检查已同步的 chunk。
+
+## ASR
+
+录音详情页可以调用 PC `/asr`。默认使用 faster-whisper；没有安装模型时服务仍能启动并返回 stub 结果。
 
 ## GitHub Actions
 
-仓库中的 `.github/workflows/android.yml` 会自动安装 JDK 17、Android SDK 35 和 Gradle 8.7，构建 Debug APK，并把 APK 上传为 workflow artifact。
+CI 会运行：
 
-## 本轮迭代
-
-- 录音完成后写入 Room `AudioChunk` 和 `AudioRange`
-- WorkManager 每 15 分钟同步已完成 chunk
-- 上传失败自动重试，缺失文件标记 FAILED
-- 增加网络权限、同步状态和 Android 构建工作流
+- JVM 单元测试
+- Debug APK 构建
+- PC FastAPI 鉴权 / 上传 / 路径安全测试
+- Android 15 / API 35 模拟器集成测试
+- sherpa-onnx AAR + Silero ONNX 模型实际加载测试
