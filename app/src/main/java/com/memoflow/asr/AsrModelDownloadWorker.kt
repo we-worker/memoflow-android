@@ -50,10 +50,24 @@ class AsrModelDownloadWorker(
             setProgress(statusData(LocalModelInstallStatus.DOWNLOADING, 0, "准备下载"))
             download(spec, archive)
 
-            setProgress(statusData(LocalModelInstallStatus.VERIFYING, 100, "校验 SHA-256"))
-            val digest = sha256(archive)
-            check(digest.equals(spec.sha256, ignoreCase = true)) {
-                "模型校验失败：expected=" + spec.sha256 + ", actual=" + digest
+            if (spec.sha256.isNotBlank()) {
+                setProgress(statusData(LocalModelInstallStatus.VERIFYING, 100, "校验 SHA-256"))
+                val digest = sha256(archive)
+                check(digest.equals(spec.sha256, ignoreCase = true)) {
+                    "模型校验失败：expected=" + spec.sha256 + ", actual=" + digest
+                }
+            } else {
+                setProgress(
+                    statusData(
+                        LocalModelInstallStatus.VERIFYING,
+                        100,
+                        "官方旧资产无 digest，校验文件大小与模型结构",
+                    ),
+                )
+                check(archive.length() == spec.archiveBytes) {
+                    "模型文件大小不匹配：expected=" + spec.archiveBytes +
+                        ", actual=" + archive.length()
+                }
             }
 
             setProgress(statusData(LocalModelInstallStatus.INSTALLING, 100, "解压安装"))
