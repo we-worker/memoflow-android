@@ -16,10 +16,13 @@ import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioFrame
 import com.memoflow.domain.AudioRange
+import com.memoflow.domain.VadEngine
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
 import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import com.memoflow.service.RecordingForegroundService
+import com.memoflow.vad.FireRedVadEngine
+import com.memoflow.vad.VadBackend
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -55,11 +58,27 @@ class AudioPostProcessWorker(
                     RecordingForegroundService.PREFS_RECORDING,
                     Context.MODE_PRIVATE,
                 )
-            val threshold =
-                prefs.getFloat(
-                    RecordingForegroundService.KEY_SILERO_THRESHOLD,
-                    RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+            val backend =
+                VadBackend.fromStored(
+                    prefs.getString(
+                        RecordingForegroundService.KEY_VAD_ENGINE,
+                        RecordingForegroundService.DEFAULT_VAD_ENGINE,
+                    ),
                 )
+            val threshold =
+                when (backend) {
+                    VadBackend.SILERO ->
+                        prefs.getFloat(
+                            RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                            RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                        )
+                    VadBackend.FIRERED_NON_STREAM,
+                    VadBackend.FIRERED_STREAM ->
+                        prefs.getFloat(
+                            RecordingForegroundService.KEY_FIRERED_THRESHOLD,
+                            RecordingForegroundService.DEFAULT_FIRERED_THRESHOLD,
+                        )
+                }
             val mergeSilenceMs =
                 prefs.getInt(
                     RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
@@ -71,6 +90,7 @@ class AudioPostProcessWorker(
                     source = original,
                     pcmFile = pcmFile,
                     waveformFile = waveformFile,
+                    backend = backend,
                     threshold = threshold,
                 )
             val sessions =
@@ -99,6 +119,7 @@ class AudioPostProcessWorker(
                 speechDurationMs = speech?.durationMs ?: 0L,
                 waveformPath = waveformFile.absolutePath,
                 state = "DONE",
+                appliedVadEngine = backend.name,
                 appliedVadThreshold = threshold,
                 appliedVadMergeSilenceMs = mergeSilenceMs,
             )
@@ -121,6 +142,7 @@ class AudioPostProcessWorker(
         source: File,
         pcmFile: File,
         waveformFile: File,
+        backend: VadBackend,
         threshold: Float,
     ): AnalysisResult {
         val extractor = MediaExtractor()
@@ -151,11 +173,21 @@ class AudioPostProcessWorker(
         decoder.configure(trackFormat, null, null, 0)
         decoder.start()
 
-        val vad =
-            SherpaOnnxSileroVadEngine(
-                context = applicationContext,
-                threshold = threshold,
-            )
+        val vad: VadEngine =
+            when (backend) {
+                VadBackend.SILERO ->
+                    SherpaOnnxSileroVadEngine(
+                        context = applicationContext,
+                        threshold = threshold,
+                    )
+                VadBackend.FIRERED_NON_STREAM,
+                VadBackend.FIRERED_STREAM ->
+                    FireRedVadEngine(
+                        context = applicationContext,
+                        backend = backend,
+                        threshold = threshold,
+                    )
+            }
         val ranges = mutableListOf<AudioRange>()
         val waveform = WaveformAccumulator()
         val output = FileOutputStream(pcmFile)

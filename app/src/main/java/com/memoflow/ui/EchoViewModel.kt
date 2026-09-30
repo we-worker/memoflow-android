@@ -4,17 +4,22 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.memoflow.asr.*
 import com.memoflow.data.*
+import com.memoflow.domain.AsrEngine
 import com.memoflow.domain.AudioReference
 import com.memoflow.processing.AudioPostProcessWorker
 import com.memoflow.processing.WaveformStore
 import com.memoflow.recording.RemoteAsrEngine
 import com.memoflow.service.BootReceiver
 import com.memoflow.service.RecordingForegroundService
+import com.memoflow.vad.VadBackend
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -25,6 +30,7 @@ data class EchoSettings(
     val apiKey: String = "",
     val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
+    val vadBackend: VadBackend = VadBackend.SILERO,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
     val vadSegmentGapMinutes: Int = RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
     val cleanupRetentionDays: Int = 7,
@@ -47,6 +53,10 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             RecordingForegroundService.PREFS_RECORDING,
             Context.MODE_PRIVATE,
         )
+    private val asrPrefs =
+        application.getSharedPreferences(PREFS_ASR, Context.MODE_PRIVATE)
+    private val secretStore = SecretStore(application)
+    private val modelManager = LocalAsrModelManager(application)
 
     val chunks =
         dao.observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -58,11 +68,26 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<EchoSettings> = _settings.asStateFlow()
 
+    private val _asrSettings = MutableStateFlow(loadAsrSettings())
+    val asrSettings: StateFlow<AsrSettings> = _asrSettings.asStateFlow()
+
+    private val _localModels = MutableStateFlow<List<LocalAsrModelState>>(emptyList())
+    val localModels: StateFlow<List<LocalAsrModelState>> = _localModels.asStateFlow()
+
     private val _serverStatus = MutableStateFlow("未检测")
     val serverStatus: StateFlow<String> = _serverStatus.asStateFlow()
 
     private val _asrState = MutableStateFlow<AsrUiState>(AsrUiState.Idle)
     val asrState: StateFlow<AsrUiState> = _asrState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            while (isActive) {
+                _localModels.value = modelManager.snapshot()
+                delay(1_500)
+            }
+        }
+    }
 
     fun ranges(chunkId: String) = dao.observeRanges(chunkId)
     fun transcripts(chunkId: String) = dao.observeTranscripts(chunkId)
@@ -75,7 +100,8 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         val current = settings.value
         val desiredGapMs = current.vadSegmentGapMinutes * 60_000L
         val parametersMatch =
-            kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
+            chunk.appliedVadEngine == current.vadBackend.name &&
+                kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
                 chunk.appliedVadMergeSilenceMs == desiredGapMs
 
         if (chunk.postProcessState == "DONE" && parametersMatch) return
@@ -110,11 +136,44 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         _settings.value = _settings.value.copy(autoResume = enabled)
     }
 
+    fun setVadBackend(backend: VadBackend) {
+        recordingPrefs.edit()
+            .putString(RecordingForegroundService.KEY_VAD_ENGINE, backend.name)
+            .apply()
+
+        val threshold =
+            when (backend) {
+                VadBackend.SILERO ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                    )
+                VadBackend.FIRERED_NON_STREAM,
+                VadBackend.FIRERED_STREAM ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_FIRERED_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_FIRERED_THRESHOLD,
+                    )
+            }.coerceIn(0.05f, 0.95f)
+
+        _settings.value =
+            _settings.value.copy(
+                vadBackend = backend,
+                vadThreshold = threshold,
+            )
+        viewModelScope.launch { dao.markPostProcessStale() }
+    }
+
     fun setVadThreshold(value: Float) {
         val safe = value.coerceIn(0.05f, 0.95f)
-        recordingPrefs.edit()
-            .putFloat(RecordingForegroundService.KEY_SILERO_THRESHOLD, safe)
-            .apply()
+        val key =
+            if (_settings.value.vadBackend == VadBackend.SILERO) {
+                RecordingForegroundService.KEY_SILERO_THRESHOLD
+            } else {
+                RecordingForegroundService.KEY_FIRERED_THRESHOLD
+            }
+
+        recordingPrefs.edit().putFloat(key, safe).apply()
         _settings.value = _settings.value.copy(vadThreshold = safe)
         viewModelScope.launch { dao.markPostProcessStale() }
     }
@@ -132,6 +191,55 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         val safe = days.coerceIn(1, 30)
         recordingPrefs.edit().putInt(KEY_CLEANUP_RETENTION_DAYS, safe).apply()
         _settings.value = _settings.value.copy(cleanupRetentionDays = safe)
+    }
+
+    fun setAsrProvider(provider: AsrProvider) {
+        asrPrefs.edit().putString(KEY_ASR_PROVIDER, provider.name).apply()
+        _asrSettings.value = _asrSettings.value.copy(provider = provider)
+    }
+
+    fun selectLocalModel(modelId: String) {
+        asrPrefs.edit().putString(KEY_LOCAL_MODEL_ID, modelId).apply()
+        _asrSettings.value = _asrSettings.value.copy(localModelId = modelId)
+    }
+
+    fun downloadLocalModel(modelId: String) {
+        modelManager.enqueueDownload(modelId)
+        viewModelScope.launch {
+            delay(200)
+            _localModels.value = modelManager.snapshot()
+        }
+    }
+
+    fun cancelLocalModelDownload(modelId: String) {
+        modelManager.cancelDownload(modelId)
+    }
+
+    fun deleteLocalModel(modelId: String) {
+        modelManager.deleteModel(modelId)
+        viewModelScope.launch { _localModels.value = modelManager.snapshot() }
+    }
+
+    fun saveAliyunApiKey(value: String) {
+        secretStore.put(SECRET_ALIYUN_KEY, value.trim())
+        _asrSettings.value = _asrSettings.value.copy(aliyunApiKey = value.trim())
+    }
+
+    fun saveAliyunModel(value: String) {
+        val cleaned = value.trim().ifBlank { "qwen3-asr-flash" }
+        asrPrefs.edit().putString(KEY_ALIYUN_MODEL, cleaned).apply()
+        _asrSettings.value = _asrSettings.value.copy(aliyunModel = cleaned)
+    }
+
+    fun saveDoubaoApiKey(value: String) {
+        secretStore.put(SECRET_DOUBAO_KEY, value.trim())
+        _asrSettings.value = _asrSettings.value.copy(doubaoApiKey = value.trim())
+    }
+
+    fun saveDoubaoModel(value: String) {
+        val cleaned = value.trim()
+        asrPrefs.edit().putString(KEY_DOUBAO_MODEL, cleaned).apply()
+        _asrSettings.value = _asrSettings.value.copy(doubaoModel = cleaned)
     }
 
     fun syncNow() {
@@ -182,13 +290,6 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun transcribe(chunk: AudioChunkEntity) {
-        val current = settings.value
-        if (current.baseUrl.isBlank() || current.apiKey.isBlank()) {
-            _asrState.value =
-                AsrUiState.Error(chunk.id, "请先在“电脑与 MCP”中配置 PC 地址和访问密钥")
-            return
-        }
-
         if (!chunk.originalAvailable || !File(chunk.audioPath).exists()) {
             _asrState.value =
                 AsrUiState.Error(
@@ -198,22 +299,72 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val reference =
+            AudioReference(
+                chunkId = chunk.id,
+                startMs = 0,
+                endMs = chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                audioPath = chunk.audioPath,
+            )
+
+        val engine =
+            runCatching { createAsrEngine() }
+                .getOrElse {
+                    _asrState.value =
+                        AsrUiState.Error(chunk.id, it.message ?: "ASR 配置不完整")
+                    return
+                }
+
         _asrState.value = AsrUiState.Running(chunk.id)
         viewModelScope.launch {
             runCatching {
-                RemoteAsrEngine(current.baseUrl, current.apiKey).transcribe(
-                    AudioReference(
-                        chunkId = chunk.id,
-                        startMs = 0,
-                        endMs = chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-                        audioPath = chunk.audioPath,
-                    ),
-                )
+                engine.transcribe(reference)
             }.onSuccess { segments ->
                 dao.replaceTranscripts(chunk.id, segments.map { it.toEntity() })
                 _asrState.value = AsrUiState.Done(chunk.id, segments.size)
             }.onFailure {
                 _asrState.value = AsrUiState.Error(chunk.id, it.message ?: "转写失败")
+            }
+        }
+    }
+
+    private fun createAsrEngine(): AsrEngine {
+        val asr = asrSettings.value
+        return when (asr.provider) {
+            AsrProvider.PC -> {
+                val current = settings.value
+                require(current.baseUrl.isNotBlank() && current.apiKey.isNotBlank()) {
+                    "请先在“电脑与 MCP”中配置 PC 地址和访问密钥"
+                }
+                RemoteAsrEngine(current.baseUrl, current.apiKey)
+            }
+
+            AsrProvider.LOCAL -> {
+                require(asr.localModelId.isNotBlank()) { "请先选择一个本地 ASR 模型" }
+                val spec =
+                    LocalAsrModelCatalog.find(asr.localModelId)
+                        ?: error("本地模型不存在")
+                require(modelManager.isInstalled(spec)) {
+                    "请先下载并安装 " + spec.displayName
+                }
+                LocalSherpaAsrEngine(getApplication(), asr.localModelId)
+            }
+
+            AsrProvider.ALIYUN -> {
+                require(asr.aliyunApiKey.isNotBlank()) { "请填写阿里云 DashScope API Key" }
+                AliyunQwenAsrEngine(
+                    apiKey = asr.aliyunApiKey,
+                    model = asr.aliyunModel.ifBlank { "qwen3-asr-flash" },
+                )
+            }
+
+            AsrProvider.DOUBAO -> {
+                require(asr.doubaoApiKey.isNotBlank()) { "请填写豆包 Ark API Key" }
+                require(asr.doubaoModel.isNotBlank()) { "请填写支持音频输入的豆包模型 ID" }
+                DoubaoArkAsrEngine(
+                    apiKey = asr.doubaoApiKey,
+                    model = asr.doubaoModel,
+                )
             }
         }
     }
@@ -249,17 +400,36 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun loadSettings() =
-        EchoSettings(
+    private fun loadSettings(): EchoSettings {
+        val backend =
+            VadBackend.fromStored(
+                recordingPrefs.getString(
+                    RecordingForegroundService.KEY_VAD_ENGINE,
+                    RecordingForegroundService.DEFAULT_VAD_ENGINE,
+                ),
+            )
+        val threshold =
+            when (backend) {
+                VadBackend.SILERO ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                    )
+                VadBackend.FIRERED_NON_STREAM,
+                VadBackend.FIRERED_STREAM ->
+                    recordingPrefs.getFloat(
+                        RecordingForegroundService.KEY_FIRERED_THRESHOLD,
+                        RecordingForegroundService.DEFAULT_FIRERED_THRESHOLD,
+                    )
+            }.coerceIn(0.05f, 0.95f)
+
+        return EchoSettings(
             baseUrl = syncPrefs.getString(ChunkSyncWorker.KEY_BASE_URL, "") ?: "",
             apiKey = syncPrefs.getString(ChunkSyncWorker.KEY_API_KEY, "") ?: "",
             wifiOnly = syncPrefs.getBoolean("wifi_only", true),
             autoResume = recordingPrefs.getBoolean(BootReceiver.KEY_AUTO_START, true),
-            vadThreshold =
-                recordingPrefs.getFloat(
-                    RecordingForegroundService.KEY_SILERO_THRESHOLD,
-                    RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
-                ).coerceIn(0.05f, 0.95f),
+            vadBackend = backend,
+            vadThreshold = threshold,
             vadSegmentGapMinutes =
                 recordingPrefs.getInt(
                     RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
@@ -268,8 +438,36 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             cleanupRetentionDays =
                 recordingPrefs.getInt(KEY_CLEANUP_RETENTION_DAYS, 7).coerceIn(1, 30),
         )
+    }
+
+    private fun loadAsrSettings(): AsrSettings {
+        val provider =
+            asrPrefs.getString(KEY_ASR_PROVIDER, AsrProvider.PC.name)
+                ?.let { runCatching { AsrProvider.valueOf(it) }.getOrNull() }
+                ?: AsrProvider.PC
+
+        return AsrSettings(
+            provider = provider,
+            localModelId = asrPrefs.getString(KEY_LOCAL_MODEL_ID, "") ?: "",
+            aliyunModel =
+                asrPrefs.getString(KEY_ALIYUN_MODEL, "qwen3-asr-flash")
+                    ?: "qwen3-asr-flash",
+            doubaoModel = asrPrefs.getString(KEY_DOUBAO_MODEL, "") ?: "",
+            aliyunApiKey = secretStore.get(SECRET_ALIYUN_KEY),
+            doubaoApiKey = secretStore.get(SECRET_DOUBAO_KEY),
+        )
+    }
 
     companion object {
         private const val KEY_CLEANUP_RETENTION_DAYS = "cleanup_retention_days"
+
+        private const val PREFS_ASR = "asr_settings"
+        private const val KEY_ASR_PROVIDER = "provider"
+        private const val KEY_LOCAL_MODEL_ID = "local_model_id"
+        private const val KEY_ALIYUN_MODEL = "aliyun_model"
+        private const val KEY_DOUBAO_MODEL = "doubao_model"
+
+        private const val SECRET_ALIYUN_KEY = "aliyun_api_key"
+        private const val SECRET_DOUBAO_KEY = "doubao_api_key"
     }
 }

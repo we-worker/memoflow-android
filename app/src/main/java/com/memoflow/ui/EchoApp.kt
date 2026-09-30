@@ -1,6 +1,7 @@
 package com.memoflow.ui
 
 import android.media.MediaPlayer
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.*
@@ -21,7 +22,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.memoflow.asr.*
 import com.memoflow.data.*
+import com.memoflow.vad.VadBackend
 import java.io.File
 import java.time.*
 import java.time.format.DateTimeFormatter
@@ -56,10 +59,31 @@ fun EchoApp(
     val settings by viewModel.settings.collectAsState()
     val serverStatus by viewModel.serverStatus.collectAsState()
     val asrState by viewModel.asrState.collectAsState()
+    val asrSettings by viewModel.asrSettings.collectAsState()
+    val localModels by viewModel.localModels.collectAsState()
 
     var section by rememberSaveable { mutableStateOf(EchoSection.Today) }
+    val sectionHistory = remember { mutableStateListOf<EchoSection>() }
     var detailId by rememberSaveable { mutableStateOf<String?>(null) }
     val detailChunk = chunks.firstOrNull { it.id == detailId }
+
+    fun navigateSection(target: EchoSection) {
+        if (target == section) return
+        sectionHistory += section
+        section = target
+    }
+
+    BackHandler(
+        enabled = detailChunk != null || sectionHistory.isNotEmpty() || section != EchoSection.Today,
+    ) {
+        if (detailChunk != null) {
+            detailId = null
+        } else if (sectionHistory.isNotEmpty()) {
+            section = sectionHistory.removeAt(sectionHistory.lastIndex)
+        } else {
+            section = EchoSection.Today
+        }
+    }
 
     MaterialTheme(
         colorScheme =
@@ -79,7 +103,7 @@ fun EchoApp(
                         EchoSection.entries.forEach { item ->
                             NavigationBarItem(
                                 selected = section == item,
-                                onClick = { section = item },
+                                onClick = { navigateSection(item) },
                                 icon = { Icon(item.icon, item.label) },
                                 label = { Text(item.label) },
                                 colors =
@@ -150,13 +174,25 @@ fun EchoApp(
                     EchoSection.Settings ->
                         SettingsScreen(
                             settings = settings,
+                            asrSettings = asrSettings,
+                            localModels = localModels,
                             chunks = chunks,
                             onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
+                            onVadBackend = viewModel::setVadBackend,
                             onVadThreshold = viewModel::setVadThreshold,
                             onVadSegmentGapMinutes = viewModel::setVadSegmentGapMinutes,
                             onCleanupRetentionDays = viewModel::setCleanupRetentionDays,
                             onDeleteOriginals = viewModel::deleteOriginals,
+                            onSetAsrProvider = viewModel::setAsrProvider,
+                            onSelectLocalModel = viewModel::selectLocalModel,
+                            onDownloadLocalModel = viewModel::downloadLocalModel,
+                            onCancelLocalModelDownload = viewModel::cancelLocalModelDownload,
+                            onDeleteLocalModel = viewModel::deleteLocalModel,
+                            onSaveAliyunApiKey = viewModel::saveAliyunApiKey,
+                            onSaveAliyunModel = viewModel::saveAliyunModel,
+                            onSaveDoubaoApiKey = viewModel::saveDoubaoApiKey,
+                            onSaveDoubaoModel = viewModel::saveDoubaoModel,
                             modifier = Modifier.padding(padding),
                         )
                 }
@@ -528,7 +564,8 @@ private fun RecordingDetailScreen(
                         }
                         "DONE" -> {
                             Text(
-                                "Silero 后处理完成 · " + rangeList.size + " 个会话段",
+                                (rangeList.firstOrNull()?.modelId ?: chunk.appliedVadEngine.ifBlank { "VAD" }) +
+                                    " 后处理完成 · " + rangeList.size + " 个会话段",
                                 color = Color(0xFF23846F),
                                 fontSize = 12.sp,
                             )
@@ -587,7 +624,7 @@ private fun RecordingDetailScreen(
                     Column(Modifier.weight(1f)) {
                         Text("ASR 转写", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "由你配置的 PC 服务处理，结果按 chunk + offset 保存。",
+                            "使用设置中选择的 ASR 引擎处理；本地、PC、阿里云和豆包最终统一写入 chunk + offset 转写结果。",
                             color = EchoMuted,
                             fontSize = 12.sp,
                         )
@@ -1046,12 +1083,12 @@ private fun ConnectScreen(
 
     Page(
         title = "电脑与 MCP",
-        subtitle = "手机负责稳定记录，电脑负责 ASR 与后续 AI 处理。",
+        subtitle = "手机稳定记录；PC 用于同步，也可以作为可选 ASR/AI 处理端。",
         modifier = modifier,
     ) {
         InfoPanel(
             "PC Processing Server",
-            "填写运行 pc_server 的电脑地址和同一把固定访问密钥。同步、健康检查和 ASR 都会携带 X-MemoFlow-Key。",
+            "填写运行 pc_server 的电脑地址和同一把固定访问密钥。同步、健康检查，以及选择 PC ASR 时的转写请求都会携带 X-MemoFlow-Key。",
         )
         OutlinedTextField(
             value = url,
@@ -1106,13 +1143,25 @@ private fun ConnectScreen(
 @Composable
 private fun SettingsScreen(
     settings: EchoSettings,
+    asrSettings: AsrSettings,
+    localModels: List<LocalAsrModelState>,
     chunks: List<AudioChunkEntity>,
     onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
+    onVadBackend: (VadBackend) -> Unit,
     onVadThreshold: (Float) -> Unit,
     onVadSegmentGapMinutes: (Int) -> Unit,
     onCleanupRetentionDays: (Int) -> Unit,
     onDeleteOriginals: (List<AudioChunkEntity>) -> Unit,
+    onSetAsrProvider: (AsrProvider) -> Unit,
+    onSelectLocalModel: (String) -> Unit,
+    onDownloadLocalModel: (String) -> Unit,
+    onCancelLocalModelDownload: (String) -> Unit,
+    onDeleteLocalModel: (String) -> Unit,
+    onSaveAliyunApiKey: (String) -> Unit,
+    onSaveAliyunModel: (String) -> Unit,
+    onSaveDoubaoApiKey: (String) -> Unit,
+    onSaveDoubaoModel: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val cutoff =
@@ -1161,12 +1210,33 @@ private fun SettingsScreen(
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Silero 不再常驻录音主循环；每个 chunk 完成后后台运行，并同时生成波形与语音裁剪版。",
+                    "VAD 只在 chunk 完成后运行。可以在同一条原始录音上切换不同模型重新分析，直接比较波形 overlay 和会话段。",
                     color = EchoMuted,
                     fontSize = 13.sp,
+                    lineHeight = 19.sp,
                 )
+
+                Text("VAD 引擎", fontWeight = FontWeight.Medium)
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    VadBackend.entries.forEach { backend ->
+                        FilterChip(
+                            selected = settings.vadBackend == backend,
+                            onClick = { onVadBackend(backend) },
+                            label = { Text(backend.displayName) },
+                        )
+                    }
+                }
                 Text(
-                    "阈值 " + "%.3f".format(settings.vadThreshold),
+                    settings.vadBackend.description,
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                )
+
+                Text(
+                    "触发阈值 " + "%.3f".format(settings.vadThreshold),
                     color = EchoBlue,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -1176,9 +1246,17 @@ private fun SettingsScreen(
                     valueRange = 0.10f..0.90f,
                 )
                 Text(
-                    "Silero 默认 0.50；越低越敏感，越高越保守。修改后，已有原始录音会标记为待重算；重新进入详情时自动重新 VAD。",
+                    when (settings.vadBackend) {
+                        VadBackend.SILERO ->
+                            "Silero 推荐从 0.50 开始；越低越敏感。"
+                        VadBackend.FIRERED_NON_STREAM ->
+                            "FireRedVAD 官方示例常用 0.40；非流式模型会一次分析完整 chunk。"
+                        VadBackend.FIRERED_STREAM ->
+                            "FireRed Stream-VAD 推荐从 0.40 附近开始；模型按 10 ms 帧维护上下文。"
+                    } + " 修改引擎或阈值后，已有原始录音会标记为待重算；重新进入详情时自动重新 VAD。",
                     color = EchoMuted,
                     fontSize = 12.sp,
+                    lineHeight = 18.sp,
                 )
                 HorizontalDivider(color = Color(0xFFE9EDF5))
                 Text(
@@ -1212,6 +1290,20 @@ private fun SettingsScreen(
             "Android 14/15 不允许开机广播直接启动麦克风前台服务，因此会在下次打开应用时恢复录音。",
             settings.autoResume,
             onAutoResume,
+        )
+
+        AsrSettingsCard(
+            settings = asrSettings,
+            localModels = localModels,
+            onSetProvider = onSetAsrProvider,
+            onSelectLocalModel = onSelectLocalModel,
+            onDownloadLocalModel = onDownloadLocalModel,
+            onCancelLocalModelDownload = onCancelLocalModelDownload,
+            onDeleteLocalModel = onDeleteLocalModel,
+            onSaveAliyunApiKey = onSaveAliyunApiKey,
+            onSaveAliyunModel = onSaveAliyunModel,
+            onSaveDoubaoApiKey = onSaveDoubaoApiKey,
+            onSaveDoubaoModel = onSaveDoubaoModel,
         )
 
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
@@ -1251,8 +1343,244 @@ private fun SettingsScreen(
 
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行 sherpa-onnx Silero VAD。",
+            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行当前选择的 VAD 引擎。",
         )
+    }
+}
+
+@Composable
+private fun AsrSettingsCard(
+    settings: AsrSettings,
+    localModels: List<LocalAsrModelState>,
+    onSetProvider: (AsrProvider) -> Unit,
+    onSelectLocalModel: (String) -> Unit,
+    onDownloadLocalModel: (String) -> Unit,
+    onCancelLocalModelDownload: (String) -> Unit,
+    onDeleteLocalModel: (String) -> Unit,
+    onSaveAliyunApiKey: (String) -> Unit,
+    onSaveAliyunModel: (String) -> Unit,
+    onSaveDoubaoApiKey: (String) -> Unit,
+    onSaveDoubaoModel: (String) -> Unit,
+) {
+    var aliyunKey by remember(settings.aliyunApiKey) { mutableStateOf(settings.aliyunApiKey) }
+    var aliyunModel by remember(settings.aliyunModel) { mutableStateOf(settings.aliyunModel) }
+    var doubaoKey by remember(settings.doubaoApiKey) { mutableStateOf(settings.doubaoApiKey) }
+    var doubaoModel by remember(settings.doubaoModel) { mutableStateOf(settings.doubaoModel) }
+
+    Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("语音识别", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "可在 PC、本地 sherpa-onnx、阿里云和豆包之间切换。App 不会自动下载任何本地大模型。",
+                color = EchoMuted,
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+            )
+
+            Text("识别引擎", fontWeight = FontWeight.Medium)
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    AsrProvider.PC to "PC",
+                    AsrProvider.LOCAL to "本地",
+                    AsrProvider.ALIYUN to "阿里云",
+                    AsrProvider.DOUBAO to "豆包",
+                ).forEach { (provider, label) ->
+                    FilterChip(
+                        selected = settings.provider == provider,
+                        onClick = { onSetProvider(provider) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+
+            when (settings.provider) {
+                AsrProvider.PC -> {
+                    InfoPanel(
+                        "PC ASR",
+                        "继续使用“连接”页里的 MemoFlow PC Server /asr 接口。",
+                    )
+                }
+
+                AsrProvider.LOCAL -> {
+                    Text("本地模型", fontWeight = FontWeight.SemiBold)
+                    if (localModels.isEmpty()) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    } else {
+                        localModels.forEach { state ->
+                            LocalAsrModelCard(
+                                state = state,
+                                selected = settings.localModelId == state.spec.id,
+                                onSelect = { onSelectLocalModel(state.spec.id) },
+                                onDownload = { onDownloadLocalModel(state.spec.id) },
+                                onCancel = { onCancelLocalModelDownload(state.spec.id) },
+                                onDelete = { onDeleteLocalModel(state.spec.id) },
+                            )
+                        }
+                    }
+                    Text(
+                        "下载默认要求非计费网络（通常为 Wi‑Fi）且电量不低。Qwen3/Fun-ASR 安装时建议至少预留约 2 GB 空间。",
+                        color = EchoMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+
+                AsrProvider.ALIYUN -> {
+                    OutlinedTextField(
+                        value = aliyunKey,
+                        onValueChange = { aliyunKey = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("DashScope API Key") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = aliyunModel,
+                        onValueChange = { aliyunModel = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("模型") },
+                        placeholder = { Text("qwen3-asr-flash") },
+                        singleLine = true,
+                    )
+                    Button(
+                        onClick = {
+                            onSaveAliyunApiKey(aliyunKey)
+                            onSaveAliyunModel(aliyunModel)
+                        },
+                    ) { Text("保存阿里云配置") }
+                    Text(
+                        "API Key 由 Android Keystore 加密保存。长于约 5 分钟的录音会自动切成技术分片提交，再按原时间轴合并。",
+                        color = EchoMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+
+                AsrProvider.DOUBAO -> {
+                    OutlinedTextField(
+                        value = doubaoKey,
+                        onValueChange = { doubaoKey = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Ark API Key") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = doubaoModel,
+                        onValueChange = { doubaoModel = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("支持音频输入的模型 ID / Endpoint ID") },
+                        singleLine = true,
+                    )
+                    Button(
+                        onClick = {
+                            onSaveDoubaoApiKey(doubaoKey)
+                            onSaveDoubaoModel(doubaoModel)
+                        },
+                    ) { Text("保存豆包配置") }
+                    Text(
+                        "API Key 由 Android Keystore 加密保存。这里使用火山方舟兼容 Chat API 的 input_audio Base64 输入。",
+                        color = EchoMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LocalAsrModelCard(
+    state: LocalAsrModelState,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val spec = state.spec
+    Card(
+        colors =
+            CardDefaults.cardColors(
+                containerColor = if (selected) Color(0xFFF2F5FF) else Color(0xFFFAFBFE),
+            ),
+        border =
+            BorderStroke(
+                1.dp,
+                if (selected) EchoBlue.copy(alpha = 0.55f) else Color(0xFFE6EBF3),
+            ),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onSelect),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(spec.displayName, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        spec.languages + " · 下载包 " + formatBytes(spec.archiveBytes),
+                        color = EchoMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+                RadioButton(selected = selected, onClick = onSelect)
+            }
+            Text(spec.description, color = EchoMuted, fontSize = 12.sp)
+
+            when (state.status) {
+                LocalModelInstallStatus.INSTALLED -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(
+                            onClick = {},
+                            label = { Text("已安装") },
+                            leadingIcon = { Icon(Icons.Outlined.CheckCircle, null) },
+                        )
+                        TextButton(onClick = onDelete) { Text("删除模型") }
+                    }
+                }
+
+                LocalModelInstallStatus.DOWNLOADING,
+                LocalModelInstallStatus.VERIFYING,
+                LocalModelInstallStatus.INSTALLING -> {
+                    LinearProgressIndicator(
+                        progress = { state.progressPercent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            state.status.name + " · " + state.progressPercent + "% " + state.detail,
+                            color = EchoMuted,
+                            fontSize = 11.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = onCancel) { Text("取消") }
+                    }
+                }
+
+                LocalModelInstallStatus.WAITING_FOR_WIFI -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("等待 Wi‑Fi / 电量条件", color = EchoMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onCancel) { Text("取消") }
+                    }
+                }
+
+                LocalModelInstallStatus.FAILED -> {
+                    Text(
+                        "下载/安装失败：" + state.detail,
+                        color = Color(0xFFBE4757),
+                        fontSize = 11.sp,
+                    )
+                    OutlinedButton(onClick = onDownload) { Text("重试下载") }
+                }
+
+                else -> {
+                    OutlinedButton(onClick = onDownload) {
+                        Icon(Icons.Outlined.Download, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("下载")
+                    }
+                }
+            }
+        }
     }
 }
 
