@@ -28,6 +28,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.json.JSONObject
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
@@ -226,10 +227,18 @@ class CoreInstrumentedTest {
 
             val request = server.takeRequest()
             assertEquals("Bearer test-key", request.getHeader("Authorization"))
-            val body = request.body.readUtf8()
-            assertTrue(body.contains("\"model\":\"qwen3-asr-flash\""))
-            assertTrue(body.contains("data:audio/mp4;base64,"))
-            assertTrue(body.contains("\"enable_itn\":true"))
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals("qwen3-asr-flash", body.getString("model"))
+            assertTrue(
+                body.getJSONArray("messages")
+                    .getJSONObject(0)
+                    .getJSONArray("content")
+                    .getJSONObject(0)
+                    .getJSONObject("input_audio")
+                    .getString("data")
+                    .startsWith("data:audio/mp4;base64,"),
+            )
+            assertTrue(body.getJSONObject("asr_options").getBoolean("enable_itn"))
         } finally {
             server.shutdown()
             source.delete()
@@ -271,11 +280,21 @@ class CoreInstrumentedTest {
 
             val request = server.takeRequest()
             assertEquals("Bearer ark-test-key", request.getHeader("Authorization"))
-            val body = request.body.readUtf8()
-            assertTrue(body.contains("\"type\":\"input_audio\""))
-            assertTrue(body.contains("\"format\":\"audio/mp4\""))
-            assertTrue(body.contains("\"model\":\"doubao-audio-test\""))
-            assertFalse(body.contains("ark-test-key"))
+            val bodyText = request.body.readUtf8()
+            val body = JSONObject(bodyText)
+            assertEquals("doubao-audio-test", body.getString("model"))
+            val audio =
+                body.getJSONArray("messages")
+                    .getJSONObject(1)
+                    .getJSONArray("content")
+                    .getJSONObject(0)
+            assertEquals("input_audio", audio.getString("type"))
+            assertEquals(
+                "audio/mp4",
+                audio.getJSONObject("input_audio").getString("format"),
+            )
+            assertTrue(audio.getJSONObject("input_audio").getString("data").isNotBlank())
+            assertFalse(bodyText.contains("ark-test-key"))
         } finally {
             server.shutdown()
             source.delete()
