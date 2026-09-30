@@ -22,6 +22,20 @@ class FireRedVadEngine(
         require(threshold in 0.01f..0.99f)
     }
 
+    fun smokeDetectPcm(pcm16le: ByteArray): Int {
+        val mode =
+            when (backend) {
+                VadBackend.FIRERED_NON_STREAM -> 0
+                VadBackend.FIRERED_STREAM -> 1
+                VadBackend.SILERO -> error("Silero does not use FireRed native runtime")
+            }
+        return FireRedVadNative.detect(
+            mode = mode,
+            modelDir = modelDir.absolutePath,
+            pcm16le = pcm16le,
+        ).size
+    }
+
     override suspend fun process(frame: AudioFrame): List<AudioRange> {
         require(frame.sampleRate == SAMPLE_RATE) {
             "FireRedVAD expects 16 kHz PCM"
