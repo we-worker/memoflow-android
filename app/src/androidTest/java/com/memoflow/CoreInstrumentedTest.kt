@@ -8,11 +8,14 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.memoflow.data.AudioChunkEntity
 import com.memoflow.data.MemoDatabase
+import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioFrame
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
+import com.memoflow.processing.AudioPostProcessWorker
 import com.memoflow.service.BootReceiver
 import java.io.File
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -112,6 +115,69 @@ class CoreInstrumentedTest {
         } finally {
             retriever.release()
         }
+    }
+
+    @Test
+    fun completedChunkRunsPostVadAndCreatesWaveform() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val outputDir = File(context.cacheDir, "post-vad-test").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+
+        val encoder = AacMediaCodecEncoder()
+        val writer = M4aChunkWriter(outputDir)
+        writer.start()
+        encoder.open(sampleRate = 16000, channels = 1, bitrate = 24000)
+
+        try {
+            repeat(40) { index ->
+                val frame =
+                    AudioFrame(
+                        pcm = sineLikePcm(index),
+                        timestampNs = index * 100_000_000L,
+                        sampleRate = 16000,
+                        channels = 1,
+                    )
+                val encoded = encoder.encode(frame)
+                encoder.outputFormat?.let(writer::onFormat)
+                encoded.forEach(writer::write)
+            }
+            val tail = encoder.flush()
+            encoder.outputFormat?.let(writer::onFormat)
+            tail.forEach(writer::write)
+        } finally {
+            encoder.close()
+        }
+
+        val chunk = writer.finish()
+        assertNotNull(chunk)
+
+        val db = MemoDatabase.get(context)
+        val entity = chunk!!.toEntity()
+        db.chunks().upsert(entity)
+
+        AudioPostProcessWorker.enqueue(context, chunk.id)
+
+        var processed = db.chunks().getChunk(chunk.id)
+        repeat(120) {
+            if (processed?.postProcessState == "DONE" || processed?.postProcessState == "FAILED") {
+                return@repeat
+            }
+            delay(250)
+            processed = db.chunks().getChunk(chunk.id)
+        }
+
+        assertNotNull(processed)
+        assertEquals("DONE", processed!!.postProcessState)
+        assertTrue(!processed!!.waveformPath.isNullOrBlank())
+        assertTrue(File(processed!!.waveformPath!!).exists())
+        assertTrue(File(processed!!.waveformPath!!).length() > 12L)
+
+        db.chunks().deleteBundle(chunk.id)
+        File(chunk.audioPath).delete()
+        processed!!.speechAudioPath?.let { File(it).delete() }
+        processed!!.waveformPath?.let { File(it).delete() }
     }
 
     @Test
