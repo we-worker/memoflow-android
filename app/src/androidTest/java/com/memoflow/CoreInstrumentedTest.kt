@@ -51,6 +51,7 @@ class CoreInstrumentedTest {
                     checksumSha256 = "abc",
                     state = "COMPLETE",
                     schemaVersion = 1,
+                    postProcessState = "READY",
                 )
             db.chunks().upsert(entity)
             assertEquals("chunk-1", db.chunks().observe().first().single().id)
