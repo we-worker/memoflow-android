@@ -11,7 +11,6 @@ import com.memoflow.data.MemoDatabase
 import com.memoflow.domain.AudioFrame
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.M4aChunkWriter
-import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import com.memoflow.service.BootReceiver
 import java.io.File
 import kotlinx.coroutines.flow.first
@@ -116,23 +115,36 @@ class CoreInstrumentedTest {
     }
 
     @Test
-    fun sherpaSileroVadLoadsModelAndAcceptsPcm() = runBlocking {
+    fun sherpaSileroVadLoadsModelAndAcceptsPcm() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val vad = SherpaOnnxSileroVadEngine(context)
+        val clazz =
+            Class.forName("com.memoflow.recording.SherpaOnnxSileroVadEngine")
+        val constructor =
+            clazz.getConstructor(
+                Context::class.java,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+            )
+        val vad =
+            constructor.newInstance(
+                context,
+                0.5f,
+                0.5f,
+                0.25f,
+                30.0f,
+                16000,
+            )
         try {
+            val accept = clazz.getMethod("smokeTestPcm", ByteArray::class.java)
             repeat(12) { index ->
-                vad.process(
-                    AudioFrame(
-                        pcm = sineLikePcm(index),
-                        timestampNs = index * 100_000_000L,
-                        sampleRate = 16000,
-                        channels = 1,
-                    ),
-                )
+                accept.invoke(vad, sineLikePcm(index))
             }
-            vad.flush()
+            clazz.getMethod("smokeFlush").invoke(vad)
         } finally {
-            vad.close()
+            clazz.getMethod("smokeRelease").invoke(vad)
         }
     }
 
