@@ -44,13 +44,13 @@ class VadSessionGrouperTest {
     }
 
     @Test
-    fun moreThanFiveMinutesStartsNewSession() {
+    fun exactlyFiveMinutesStartsNewSession() {
         val grouped =
             groupVadSessions(
                 ranges =
                     listOf(
                         range(0, 1_000),
-                        range(1_000 + 5 * 60_000L + 1_000L, 320_000L),
+                        range(1_000 + 5 * 60_000L, 320_000L),
                     ),
                 mergeSilenceMs = 5 * 60_000L,
                 durationMs = 10 * 60_000L,
