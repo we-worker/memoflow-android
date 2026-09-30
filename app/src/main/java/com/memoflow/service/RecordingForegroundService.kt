@@ -11,11 +11,10 @@ import com.memoflow.MainActivity
 import com.memoflow.data.ChunkSyncWorker
 import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
-import com.memoflow.domain.AudioRange
+import com.memoflow.processing.AudioPostProcessWorker
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.AudioRecordSource
 import com.memoflow.recording.M4aChunkWriter
-import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +75,7 @@ class RecordingForegroundService : Service() {
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("回声正在记录")
-            .setContentText("Silero VAD 正在本机标记语音，原始音频持续保存")
+            .setContentText("录音阶段只做 AAC/M4A；每个 chunk 完成后再后台 VAD")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(
@@ -103,14 +102,7 @@ class RecordingForegroundService : Service() {
         val source = AudioRecordSource()
         var encoder = AacMediaCodecEncoder()
         var writer = M4aChunkWriter(File(filesDir, "audio"))
-        val prefs = getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
-        val vad =
-            SherpaOnnxSileroVadEngine(
-                context = this,
-                threshold = prefs.getFloat(KEY_SILERO_THRESHOLD, DEFAULT_SILERO_THRESHOLD),
-            )
         var chunkStartMs = System.currentTimeMillis()
-        val ranges = mutableListOf<AudioRange>()
 
         try {
             source.start()
@@ -120,26 +112,13 @@ class RecordingForegroundService : Service() {
             while (currentCoroutineContext().isActive) {
                 val frame = source.read() ?: break
 
-                ranges +=
-                    vad.process(frame).map {
-                        it.copy(chunkId = writer.currentId)
-                    }
-
                 val encoded = encoder.encode(frame)
                 encoder.outputFormat?.let(writer::onFormat)
                 encoded.forEach(writer::write)
 
                 if (System.currentTimeMillis() - chunkStartMs >= CHUNK_DURATION_MS) {
-                    ranges +=
-                        vad.flush().map {
-                            it.copy(chunkId = writer.currentId)
-                        }
-
                     finalizeEncoderIntoWriter(encoder, writer)
-                    finishChunk(writer, ranges)
-
-                    ranges.clear()
-                    vad.reset()
+                    finishChunkAndEnqueuePostProcess(writer)
 
                     encoder = AacMediaCodecEncoder()
                     encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
@@ -149,15 +128,8 @@ class RecordingForegroundService : Service() {
             }
         } finally {
             withContext(NonCancellable) {
-                runCatching {
-                    ranges +=
-                        vad.flush().map {
-                            it.copy(chunkId = writer.currentId)
-                        }
-                }
                 runCatching { finalizeEncoderIntoWriter(encoder, writer) }
-                runCatching { finishChunk(writer, ranges) }
-                runCatching { vad.close() }
+                runCatching { finishChunkAndEnqueuePostProcess(writer) }
                 runCatching { encoder.close() }
                 runCatching { source.stop() }
             }
@@ -174,15 +146,10 @@ class RecordingForegroundService : Service() {
         encoder.close()
     }
 
-    private suspend fun finishChunk(
-        writer: M4aChunkWriter,
-        ranges: List<AudioRange>,
-    ) {
+    private suspend fun finishChunkAndEnqueuePostProcess(writer: M4aChunkWriter) {
         writer.finish()?.let { chunk ->
             db.chunks().upsert(chunk.toEntity())
-            if (ranges.isNotEmpty()) {
-                db.chunks().insertRanges(ranges.map { it.toEntity(chunk.id) })
-            }
+            AudioPostProcessWorker.enqueue(this, chunk.id)
         }
     }
 

@@ -2,8 +2,6 @@ package com.memoflow.data
 
 import android.content.Context
 import androidx.room.*
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "audio_chunks")
@@ -23,6 +21,11 @@ data class AudioChunkEntity(
     val checksumSha256: String,
     val state: String,
     val schemaVersion: Int,
+    val speechAudioPath: String? = null,
+    val speechDurationMs: Long = 0L,
+    val waveformPath: String? = null,
+    val postProcessState: String = "PENDING",
+    val originalAvailable: Boolean = true,
 )
 
 @Entity(tableName = "audio_ranges", primaryKeys = ["chunkId", "startOffsetMs", "endOffsetMs"])
@@ -62,6 +65,9 @@ interface ChunkDao {
     @Query("SELECT * FROM audio_chunks ORDER BY startTimeUtcMs DESC")
     fun observe(): Flow<List<AudioChunkEntity>>
 
+    @Query("SELECT * FROM audio_chunks WHERE id = :chunkId LIMIT 1")
+    suspend fun getChunk(chunkId: String): AudioChunkEntity?
+
     @Query("SELECT * FROM audio_ranges WHERE chunkId = :chunkId ORDER BY startOffsetMs")
     fun observeRanges(chunkId: String): Flow<List<AudioRangeEntity>>
 
@@ -74,14 +80,52 @@ interface ChunkDao {
     @Query("SELECT COUNT(*) FROM transcript_segments")
     fun observeTranscriptCount(): Flow<Int>
 
-    @Query("SELECT * FROM audio_chunks WHERE state IN ('COMPLETE','UPLOAD_PENDING','FAILED') ORDER BY startTimeUtcMs")
+    @Query("""
+        SELECT * FROM audio_chunks
+        WHERE state IN ('COMPLETE','UPLOAD_PENDING','FAILED')
+          AND postProcessState IN ('DONE','FAILED','READY')
+        ORDER BY startTimeUtcMs
+    """)
     suspend fun pending(): List<AudioChunkEntity>
 
     @Query("SELECT * FROM audio_ranges WHERE chunkId = :chunkId ORDER BY startOffsetMs")
     suspend fun rangesForChunk(chunkId: String): List<AudioRangeEntity>
 
+    @Query("""
+        SELECT * FROM audio_chunks
+        WHERE originalAvailable = 1
+          AND state = 'UPLOADED'
+          AND speechAudioPath IS NOT NULL
+          AND postProcessState = 'DONE'
+          AND endTimeUtcMs < :cutoffMs
+        ORDER BY endTimeUtcMs
+    """)
+    suspend fun originalCleanupCandidates(cutoffMs: Long): List<AudioChunkEntity>
+
     @Query("UPDATE audio_chunks SET state = :state WHERE id = :id")
     suspend fun updateState(id: String, state: String)
+
+    @Query("UPDATE audio_chunks SET postProcessState = :state WHERE id = :id")
+    suspend fun updatePostProcessState(id: String, state: String)
+
+    @Query("""
+        UPDATE audio_chunks
+        SET speechAudioPath = :speechAudioPath,
+            speechDurationMs = :speechDurationMs,
+            waveformPath = :waveformPath,
+            postProcessState = :state
+        WHERE id = :id
+    """)
+    suspend fun updatePostProcessResult(
+        id: String,
+        speechAudioPath: String?,
+        speechDurationMs: Long,
+        waveformPath: String?,
+        state: String,
+    )
+
+    @Query("UPDATE audio_chunks SET originalAvailable = 0 WHERE id = :id")
+    suspend fun markOriginalDeleted(id: String)
 
     @Query("DELETE FROM transcript_segments WHERE chunkId = :chunkId")
     suspend fun deleteTranscripts(chunkId: String)
@@ -99,6 +143,12 @@ interface ChunkDao {
     }
 
     @Transaction
+    suspend fun replaceRanges(chunkId: String, ranges: List<AudioRangeEntity>) {
+        deleteRanges(chunkId)
+        if (ranges.isNotEmpty()) insertRanges(ranges)
+    }
+
+    @Transaction
     suspend fun deleteBundle(chunkId: String) {
         deleteTranscripts(chunkId)
         deleteRanges(chunkId)
@@ -108,7 +158,7 @@ interface ChunkDao {
 
 @Database(
     entities = [AudioChunkEntity::class, AudioRangeEntity::class, TranscriptSegmentEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class MemoDatabase : RoomDatabase() {
@@ -117,31 +167,14 @@ abstract class MemoDatabase : RoomDatabase() {
     companion object {
         @Volatile private var INSTANCE: MemoDatabase? = null
 
-        private val MIGRATION_1_2 =
-            object : Migration(1, 2) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL(
-                        """CREATE TABLE IF NOT EXISTS transcript_segments (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                            chunkId TEXT NOT NULL,
-                            startOffsetMs INTEGER NOT NULL,
-                            endOffsetMs INTEGER NOT NULL,
-                            text TEXT NOT NULL,
-                            language TEXT,
-                            modelId TEXT,
-                            modelVersion TEXT
-                        )""".trimIndent()
-                    )
-                }
-            }
-
         fun get(context: Context): MemoDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     MemoDatabase::class.java,
                     "memoflow.db",
-                ).addMigrations(MIGRATION_1_2)
+                )
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }

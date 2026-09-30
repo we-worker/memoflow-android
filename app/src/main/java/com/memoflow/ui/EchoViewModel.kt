@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.memoflow.data.*
 import com.memoflow.domain.AudioReference
+import com.memoflow.processing.AudioPostProcessWorker
+import com.memoflow.processing.WaveformStore
 import com.memoflow.recording.RemoteAsrEngine
 import com.memoflow.service.BootReceiver
 import com.memoflow.service.RecordingForegroundService
@@ -24,6 +26,7 @@ data class EchoSettings(
     val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+    val cleanupRetentionDays: Int = 7,
 )
 
 sealed interface AsrUiState {
@@ -63,6 +66,18 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     fun ranges(chunkId: String) = dao.observeRanges(chunkId)
     fun transcripts(chunkId: String) = dao.observeTranscripts(chunkId)
 
+    fun ensurePostProcessed(chunk: AudioChunkEntity) {
+        if (!chunk.originalAvailable) return
+        if (chunk.postProcessState == "DONE" || chunk.postProcessState == "PROCESSING") return
+        if (!File(chunk.audioPath).exists()) return
+        AudioPostProcessWorker.enqueue(getApplication(), chunk.id)
+    }
+
+    suspend fun loadWaveform(path: String?): List<Float> =
+        withContext(Dispatchers.IO) {
+            if (path.isNullOrBlank()) emptyList() else WaveformStore.read(File(path))
+        }
+
     fun saveBaseUrl(value: String) {
         val cleaned = value.trim().trimEnd('/')
         syncPrefs.edit().putString(ChunkSyncWorker.KEY_BASE_URL, cleaned).apply()
@@ -92,6 +107,12 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             .putFloat(RecordingForegroundService.KEY_SILERO_THRESHOLD, safe)
             .apply()
         _settings.value = _settings.value.copy(vadThreshold = safe)
+    }
+
+    fun setCleanupRetentionDays(days: Int) {
+        val safe = days.coerceIn(1, 30)
+        recordingPrefs.edit().putInt(KEY_CLEANUP_RETENTION_DAYS, safe).apply()
+        _settings.value = _settings.value.copy(cleanupRetentionDays = safe)
     }
 
     fun syncNow() {
@@ -149,6 +170,15 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (!chunk.originalAvailable || !File(chunk.audioPath).exists()) {
+            _asrState.value =
+                AsrUiState.Error(
+                    chunk.id,
+                    "原始素材已删除，不能重新生成带原始时间坐标的 ASR；已有转写结果仍会保留",
+                )
+            return
+        }
+
         _asrState.value = AsrUiState.Running(chunk.id)
         viewModelScope.launch {
             runCatching {
@@ -169,9 +199,32 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteOriginal(chunk: AudioChunkEntity) {
+        if (!chunk.originalAvailable) return
+        val speechPath = chunk.speechAudioPath ?: return
+        if (!File(speechPath).exists()) return
+
+        viewModelScope.launch {
+            val deleted =
+                withContext(Dispatchers.IO) {
+                    val original = File(chunk.audioPath)
+                    !original.exists() || original.delete()
+                }
+            if (deleted) dao.markOriginalDeleted(chunk.id)
+        }
+    }
+
+    fun deleteOriginals(chunks: List<AudioChunkEntity>) {
+        chunks.forEach(::deleteOriginal)
+    }
+
     fun deleteChunk(chunk: AudioChunkEntity, onDone: () -> Unit = {}) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { File(chunk.audioPath).delete() }
+            withContext(Dispatchers.IO) {
+                File(chunk.audioPath).delete()
+                chunk.speechAudioPath?.let { File(it).delete() }
+                chunk.waveformPath?.let { File(it).delete() }
+            }
             dao.deleteBundle(chunk.id)
             onDone()
         }
@@ -188,5 +241,11 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                     RecordingForegroundService.KEY_SILERO_THRESHOLD,
                     RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
                 ).coerceIn(0.05f, 0.95f),
+            cleanupRetentionDays =
+                recordingPrefs.getInt(KEY_CLEANUP_RETENTION_DAYS, 7).coerceIn(1, 30),
         )
+
+    companion object {
+        private const val KEY_CLEANUP_RETENTION_DAYS = "cleanup_retention_days"
+    }
 }
