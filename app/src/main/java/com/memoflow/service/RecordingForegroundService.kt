@@ -14,10 +14,19 @@ import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioRange
 import com.memoflow.recording.AacMediaCodecEncoder
 import com.memoflow.recording.AudioRecordSource
-import com.memoflow.recording.EnergyVadEngine
 import com.memoflow.recording.M4aChunkWriter
+import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import java.io.File
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class RecordingForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -67,7 +76,7 @@ class RecordingForegroundService : Service() {
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("回声正在记录")
-            .setContentText("声音保存在本机，可在应用内回听")
+            .setContentText("Silero VAD 正在本机标记语音，原始音频持续保存")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(
@@ -95,7 +104,11 @@ class RecordingForegroundService : Service() {
         var encoder = AacMediaCodecEncoder()
         var writer = M4aChunkWriter(File(filesDir, "audio"))
         val prefs = getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
-        var vad = EnergyVadEngine(threshold = prefs.getFloat(KEY_VAD_THRESHOLD, 0.012f).toDouble())
+        val vad =
+            SherpaOnnxSileroVadEngine(
+                context = this,
+                threshold = prefs.getFloat(KEY_SILERO_THRESHOLD, DEFAULT_SILERO_THRESHOLD),
+            )
         var chunkStartMs = System.currentTimeMillis()
         val ranges = mutableListOf<AudioRange>()
 
@@ -106,28 +119,45 @@ class RecordingForegroundService : Service() {
 
             while (currentCoroutineContext().isActive) {
                 val frame = source.read() ?: break
-                ranges += vad.process(frame).map { it.copy(chunkId = writer.currentId) }
+
+                ranges +=
+                    vad.process(frame).map {
+                        it.copy(chunkId = writer.currentId)
+                    }
 
                 val encoded = encoder.encode(frame)
                 encoder.outputFormat?.let(writer::onFormat)
                 encoded.forEach(writer::write)
 
                 if (System.currentTimeMillis() - chunkStartMs >= CHUNK_DURATION_MS) {
+                    ranges +=
+                        vad.flush().map {
+                            it.copy(chunkId = writer.currentId)
+                        }
+
                     finalizeEncoderIntoWriter(encoder, writer)
                     finishChunk(writer, ranges)
 
                     ranges.clear()
+                    vad.reset()
+
                     encoder = AacMediaCodecEncoder()
                     encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
                     writer = M4aChunkWriter(File(filesDir, "audio")).also { it.start() }
-                    vad = EnergyVadEngine(threshold = prefs.getFloat(KEY_VAD_THRESHOLD, 0.012f).toDouble())
                     chunkStartMs = System.currentTimeMillis()
                 }
             }
         } finally {
             withContext(NonCancellable) {
+                runCatching {
+                    ranges +=
+                        vad.flush().map {
+                            it.copy(chunkId = writer.currentId)
+                        }
+                }
                 runCatching { finalizeEncoderIntoWriter(encoder, writer) }
                 runCatching { finishChunk(writer, ranges) }
+                runCatching { vad.close() }
                 runCatching { encoder.close() }
                 runCatching { source.stop() }
             }
@@ -189,7 +219,8 @@ class RecordingForegroundService : Service() {
         const val PREFS_RECORDING = "recording"
         const val KEY_RECORDING_ACTIVE = "recording_active"
         const val KEY_RECORDING_STARTED_AT = "recording_started_at"
-        const val KEY_VAD_THRESHOLD = "vad_threshold"
+        const val KEY_SILERO_THRESHOLD = "silero_vad_threshold"
+        const val DEFAULT_SILERO_THRESHOLD = 0.5f
 
         private const val NOTIFICATION_ID = 7
         private const val SAMPLE_RATE = 16000

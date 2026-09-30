@@ -115,6 +115,40 @@ class CoreInstrumentedTest {
     }
 
     @Test
+    fun sherpaSileroVadLoadsModelAndAcceptsPcm() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val clazz =
+            Class.forName("com.memoflow.recording.SherpaOnnxSileroVadEngine")
+        val constructor =
+            clazz.getConstructor(
+                Context::class.java,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+            )
+        val vad =
+            constructor.newInstance(
+                context,
+                0.5f,
+                0.5f,
+                0.25f,
+                30.0f,
+                16000,
+            )
+        try {
+            val accept = clazz.getMethod("smokeTestPcm", ByteArray::class.java)
+            repeat(12) { index ->
+                accept.invoke(vad, sineLikePcm(index))
+            }
+            clazz.getMethod("smokeFlush").invoke(vad)
+        } finally {
+            clazz.getMethod("smokeRelease").invoke(vad)
+        }
+    }
+
+    @Test
     fun bootReceiverDefersMicrophoneResumeUntilUiIsVisible() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val prefs = context.getSharedPreferences(BootReceiver.PREFS, Context.MODE_PRIVATE)

@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memoflow.data.*
@@ -132,6 +133,7 @@ fun EchoApp(
                             settings = settings,
                             serverStatus = serverStatus,
                             onSaveBaseUrl = viewModel::saveBaseUrl,
+                            onSaveApiKey = viewModel::saveApiKey,
                             onTest = viewModel::testServer,
                             onSyncNow = viewModel::syncNow,
                             modifier = Modifier.padding(padding),
@@ -700,11 +702,13 @@ private fun ConnectScreen(
     settings: EchoSettings,
     serverStatus: String,
     onSaveBaseUrl: (String) -> Unit,
+    onSaveApiKey: (String) -> Unit,
     onTest: () -> Unit,
     onSyncNow: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var url by remember(settings.baseUrl) { mutableStateOf(settings.baseUrl) }
+    var apiKey by remember(settings.apiKey) { mutableStateOf(settings.apiKey) }
 
     Page(
         title = "电脑与 MCP",
@@ -713,7 +717,7 @@ private fun ConnectScreen(
     ) {
         InfoPanel(
             "PC Processing Server",
-            "填写运行 pc_server 的电脑地址。局域网 Demo 可直接使用，例如 http://192.168.1.10:8787。",
+            "填写运行 pc_server 的电脑地址和同一把固定访问密钥。同步、健康检查和 ASR 都会携带 X-MemoFlow-Key。",
         )
         OutlinedTextField(
             value = url,
@@ -723,8 +727,26 @@ private fun ConnectScreen(
             placeholder = { Text("http://192.168.1.10:8787") },
             singleLine = true,
         )
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("访问密钥") },
+            placeholder = { Text("与 PC 的 MEMOFLOW_API_KEY 保持一致") },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+        )
+        Text(
+            "Demo 使用局域网 HTTP + 固定密钥。密钥保存在本机，不要把 PC 的 8787 端口暴露到公网。",
+            color = EchoMuted,
+            fontSize = 12.sp,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { onSaveBaseUrl(url); onTest() }) {
+            Button(onClick = {
+                onSaveBaseUrl(url)
+                onSaveApiKey(apiKey)
+                onTest()
+            }) {
                 Icon(Icons.Outlined.Cloud, null)
                 Spacer(Modifier.width(7.dp))
                 Text("保存并检测")
@@ -763,7 +785,7 @@ private fun SettingsScreen(
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("灵敏度只影响 VAD 标记，不会停止原始音频录制。", color = EchoMuted, fontSize = 13.sp)
+                Text("Silero 阈值只影响 VAD 标记，不会停止原始音频录制。", color = EchoMuted, fontSize = 13.sp)
                 Text(
                     "阈值 ${"%.3f".format(settings.vadThreshold)}",
                     color = EchoBlue,
@@ -772,10 +794,10 @@ private fun SettingsScreen(
                 Slider(
                     value = settings.vadThreshold,
                     onValueChange = onVadThreshold,
-                    valueRange = 0.003f..0.040f,
+                    valueRange = 0.10f..0.90f,
                 )
                 Text(
-                    "越低越敏感；安静环境可适当降低，嘈杂环境可提高。新设置从下一次录音开始生效。",
+                    "Silero 默认 0.50；越低越敏感，越高越保守。新设置从下一次录音开始生效。",
                     color = EchoMuted,
                     fontSize = 12.sp,
                 )
@@ -796,7 +818,7 @@ private fun SettingsScreen(
         )
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动生成一个 chunk。",
+            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；sherpa-onnx Silero VAD 使用 512-sample window；每 10 分钟滚动一个 chunk。",
         )
     }
 }

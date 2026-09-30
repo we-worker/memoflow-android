@@ -20,9 +20,10 @@ import okhttp3.Request
 
 data class EchoSettings(
     val baseUrl: String = "",
+    val apiKey: String = "",
     val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
-    val vadThreshold: Float = 0.012f,
+    val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
 )
 
 sealed interface AsrUiState {
@@ -35,8 +36,13 @@ sealed interface AsrUiState {
 class EchoViewModel(application: Application) : AndroidViewModel(application) {
     private val db = MemoDatabase.get(application)
     private val dao = db.chunks()
-    private val syncPrefs = application.getSharedPreferences(ChunkSyncWorker.PREFS_SYNC, Context.MODE_PRIVATE)
-    private val recordingPrefs = application.getSharedPreferences(RecordingForegroundService.PREFS_RECORDING, Context.MODE_PRIVATE)
+    private val syncPrefs =
+        application.getSharedPreferences(ChunkSyncWorker.PREFS_SYNC, Context.MODE_PRIVATE)
+    private val recordingPrefs =
+        application.getSharedPreferences(
+            RecordingForegroundService.PREFS_RECORDING,
+            Context.MODE_PRIVATE,
+        )
 
     val chunks =
         dao.observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -63,6 +69,12 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         _settings.value = _settings.value.copy(baseUrl = cleaned)
     }
 
+    fun saveApiKey(value: String) {
+        val cleaned = value.trim()
+        syncPrefs.edit().putString(ChunkSyncWorker.KEY_API_KEY, cleaned).apply()
+        _settings.value = _settings.value.copy(apiKey = cleaned)
+    }
+
     fun setWifiOnly(enabled: Boolean) {
         syncPrefs.edit().putBoolean("wifi_only", enabled).apply()
         _settings.value = _settings.value.copy(wifiOnly = enabled)
@@ -75,8 +87,11 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setVadThreshold(value: Float) {
-        recordingPrefs.edit().putFloat(RecordingForegroundService.KEY_VAD_THRESHOLD, value).apply()
-        _settings.value = _settings.value.copy(vadThreshold = value)
+        val safe = value.coerceIn(0.05f, 0.95f)
+        recordingPrefs.edit()
+            .putFloat(RecordingForegroundService.KEY_SILERO_THRESHOLD, safe)
+            .apply()
+        _settings.value = _settings.value.copy(vadThreshold = safe)
     }
 
     fun syncNow() {
@@ -84,11 +99,16 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testServer() {
-        val url = settings.value.baseUrl
-        if (url.isBlank()) {
+        val current = settings.value
+        if (current.baseUrl.isBlank()) {
             _serverStatus.value = "请先填写电脑地址"
             return
         }
+        if (current.apiKey.isBlank()) {
+            _serverStatus.value = "请先填写访问密钥"
+            return
+        }
+
         _serverStatus.value = "连接中…"
         viewModelScope.launch {
             val message =
@@ -98,31 +118,41 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                             .connectTimeout(4, TimeUnit.SECONDS)
                             .readTimeout(6, TimeUnit.SECONDS)
                             .build()
-                            .newCall(Request.Builder().url("$url/health").get().build())
+                            .newCall(
+                                Request.Builder()
+                                    .url(current.baseUrl.trimEnd('/') + "/health")
+                                    .header(ChunkSyncWorker.API_KEY_HEADER, current.apiKey)
+                                    .get()
+                                    .build(),
+                            )
                             .execute()
                             .use { response ->
                                 if (response.isSuccessful) {
-                                    "已连接 · " + response.body?.string().orEmpty()
+                                    "已认证连接 · " + response.body?.string().orEmpty()
                                 } else {
                                     "连接失败 · HTTP " + response.code
                                 }
                             }
-                    }.getOrElse { "连接失败 · " + (it.message ?: it.javaClass.simpleName) }
+                    }.getOrElse {
+                        "连接失败 · " + (it.message ?: it.javaClass.simpleName)
+                    }
                 }
             _serverStatus.value = message
         }
     }
 
     fun transcribe(chunk: AudioChunkEntity) {
-        val url = settings.value.baseUrl
-        if (url.isBlank()) {
-            _asrState.value = AsrUiState.Error(chunk.id, "请先在“电脑与 MCP”中配置 PC 服务地址")
+        val current = settings.value
+        if (current.baseUrl.isBlank() || current.apiKey.isBlank()) {
+            _asrState.value =
+                AsrUiState.Error(chunk.id, "请先在“电脑与 MCP”中配置 PC 地址和访问密钥")
             return
         }
+
         _asrState.value = AsrUiState.Running(chunk.id)
         viewModelScope.launch {
             runCatching {
-                RemoteAsrEngine(url).transcribe(
+                RemoteAsrEngine(current.baseUrl, current.apiKey).transcribe(
                     AudioReference(
                         chunkId = chunk.id,
                         startMs = 0,
@@ -150,8 +180,13 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadSettings() =
         EchoSettings(
             baseUrl = syncPrefs.getString(ChunkSyncWorker.KEY_BASE_URL, "") ?: "",
+            apiKey = syncPrefs.getString(ChunkSyncWorker.KEY_API_KEY, "") ?: "",
             wifiOnly = syncPrefs.getBoolean("wifi_only", true),
             autoResume = recordingPrefs.getBoolean(BootReceiver.KEY_AUTO_START, true),
-            vadThreshold = recordingPrefs.getFloat(RecordingForegroundService.KEY_VAD_THRESHOLD, 0.012f),
+            vadThreshold =
+                recordingPrefs.getFloat(
+                    RecordingForegroundService.KEY_SILERO_THRESHOLD,
+                    RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
+                ).coerceIn(0.05f, 0.95f),
         )
 }
