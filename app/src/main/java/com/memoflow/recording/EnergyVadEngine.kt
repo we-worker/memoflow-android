@@ -1,8 +1,61 @@
 package com.memoflow.recording
-import com.memoflow.domain.*
+
+import com.memoflow.domain.AudioFrame
+import com.memoflow.domain.AudioRange
+import com.memoflow.domain.VadEngine
 import kotlin.math.sqrt
-class EnergyVadEngine(private val threshold:Double=0.012):VadEngine {
- private var speech=false; private var startNs=0L
- override suspend fun process(frame:AudioFrame):List<AudioRange>{ val s=frame.pcm; var sum=0.0; var i=0; while(i+1<s.size){val v=((s[i].toInt() and 255) or (s[i+1].toInt() shl 8)).toShort().toInt()/32768.0;sum+=v*v;i+=2}; val rms=if(s.isEmpty())0.0 else sqrt(sum/(s.size/2)); val now=frame.timestampNs; val out=mutableListOf<AudioRange>(); if(rms>=threshold&&!speech){speech=true;startNs=now}; if(rms<threshold&&speech){speech=false; val st=((startNs/1_000_000)%600_000); val en=((now/1_000_000)%600_000); out+=AudioRange("active",st,en,confidence=(rms/threshold).coerceIn(0.0,1.0).toFloat(),modelId="energy-vad",modelVersion="1")}; return out }
- override suspend fun reset(){speech=false;startNs=0}
+
+class EnergyVadEngine(
+    private val threshold: Double = 0.012,
+) : VadEngine {
+    private var baseTimestampNs: Long? = null
+    private var speech = false
+    private var speechStartMs = 0L
+
+    override suspend fun process(frame: AudioFrame): List<AudioRange> {
+        val baseNs = baseTimestampNs ?: frame.timestampNs.also { baseTimestampNs = it }
+        val nowMs = ((frame.timestampNs - baseNs) / 1_000_000L).coerceAtLeast(0L)
+
+        var squaredSum = 0.0
+        var sampleCount = 0
+        var index = 0
+        while (index + 1 < frame.pcm.size) {
+            val raw =
+                ((frame.pcm[index].toInt() and 0xff) or
+                    (frame.pcm[index + 1].toInt() shl 8))
+                    .toShort()
+                    .toInt()
+            val normalized = raw / 32768.0
+            squaredSum += normalized * normalized
+            sampleCount++
+            index += 2
+        }
+
+        val rms = if (sampleCount == 0) 0.0 else sqrt(squaredSum / sampleCount)
+        val output = mutableListOf<AudioRange>()
+
+        if (rms >= threshold && !speech) {
+            speech = true
+            speechStartMs = nowMs
+        } else if (rms < threshold && speech) {
+            speech = false
+            output +=
+                AudioRange(
+                    chunkId = "active",
+                    startOffsetMs = speechStartMs,
+                    endOffsetMs = nowMs,
+                    confidence = 1.0f,
+                    modelId = "energy-vad",
+                    modelVersion = "1",
+                )
+        }
+
+        return output
+    }
+
+    override suspend fun reset() {
+        baseTimestampNs = null
+        speech = false
+        speechStartMs = 0L
+    }
 }

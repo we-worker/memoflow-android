@@ -19,26 +19,36 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.memoflow.service.BootReceiver
 import com.memoflow.service.RecordingForegroundService
 
 class MainActivity : ComponentActivity() {
+    private var recordingActive by mutableStateOf(false)
+
     private val permission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-            if (it) startCapture()
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) startCapture()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         setContent {
             MemoApp(
+                active = recordingActive,
                 onStart = { ensurePermission() },
                 onStop = { stopCapture() },
             )
+        }
+
+        val prefs = getSharedPreferences(BootReceiver.PREFS, MODE_PRIVATE)
+        if (prefs.getBoolean(BootReceiver.KEY_RESUME_REQUESTED, false)) {
+            prefs.edit().putBoolean(BootReceiver.KEY_RESUME_REQUESTED, false).apply()
+            ensurePermission()
         }
     }
 
@@ -54,11 +64,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startCapture() {
-        ContextCompat.startForegroundService(
-            this,
-            Intent(this, RecordingForegroundService::class.java)
-                .setAction(RecordingForegroundService.ACTION_START),
-        )
+        val result =
+            runCatching {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, RecordingForegroundService::class.java)
+                        .setAction(RecordingForegroundService.ACTION_START),
+                )
+            }
+        recordingActive = result.isSuccess
     }
 
     private fun stopCapture() {
@@ -66,16 +80,16 @@ class MainActivity : ComponentActivity() {
             Intent(this, RecordingForegroundService::class.java)
                 .setAction(RecordingForegroundService.ACTION_STOP),
         )
+        recordingActive = false
     }
 }
 
 @Composable
 fun MemoApp(
+    active: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
-    var active by remember { mutableStateOf(false) }
-
     MaterialTheme {
         Surface {
             Column(
@@ -92,12 +106,7 @@ fun MemoApp(
                     ) {
                         Text(if (active) "Recording is active" else "Recording is stopped")
                         Text("AudioRecord · AAC-LC · 10 minute M4A · VAD")
-                        Button(
-                            onClick = {
-                                if (active) onStop() else onStart()
-                                active = !active
-                            },
-                        ) {
+                        Button(onClick = { if (active) onStop() else onStart() }) {
                             Text(if (active) "Stop recording" else "Start recording")
                         }
                     }

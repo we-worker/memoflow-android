@@ -14,8 +14,7 @@ class AacMediaCodecEncoder : AudioEncoder {
         private set
 
     private var codec: MediaCodec? = null
-    private var pts = 0L
-    private val frameUs = 100_000L
+    private var ptsUs = 0L
 
     override suspend fun open(
         sampleRate: Int,
@@ -38,7 +37,7 @@ class AacMediaCodecEncoder : AudioEncoder {
                 it.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 it.start()
             }
-        pts = 0L
+        ptsUs = 0L
         outputFormat = null
     }
 
@@ -52,11 +51,16 @@ class AacMediaCodecEncoder : AudioEncoder {
                 buffer.clear()
                 buffer.put(frame.pcm)
             }
-            codec.queueInputBuffer(inputIndex, 0, frame.pcm.size, pts, 0)
-            pts += frameUs
+            codec.queueInputBuffer(inputIndex, 0, frame.pcm.size, ptsUs, 0)
+
+            val bytesPerSample = 2
+            val samples =
+                if (frame.channels > 0) frame.pcm.size / bytesPerSample / frame.channels else 0
+            ptsUs +=
+                if (frame.sampleRate > 0) samples * 1_000_000L / frame.sampleRate else 0L
         }
 
-        drain(codec, output)
+        drain(codec, output, waitForEos = false)
         return output
     }
 
@@ -70,41 +74,56 @@ class AacMediaCodecEncoder : AudioEncoder {
                 inputIndex,
                 0,
                 0,
-                pts,
+                ptsUs,
                 MediaCodec.BUFFER_FLAG_END_OF_STREAM,
             )
         }
 
-        drain(codec, output)
+        drain(codec, output, waitForEos = true)
         return output
     }
 
     private fun drain(
         codec: MediaCodec,
         output: MutableList<EncodedAudioFrame>,
+        waitForEos: Boolean,
     ) {
         val info = MediaCodec.BufferInfo()
+        var idlePolls = 0
 
         while (true) {
-            when (val outputIndex = codec.dequeueOutputBuffer(info, 0)) {
-                MediaCodec.INFO_TRY_AGAIN_LATER -> break
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> outputFormat = codec.outputFormat
+            val outputIndex = codec.dequeueOutputBuffer(info, if (waitForEos) 10_000 else 0)
+            when (outputIndex) {
+                MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    if (!waitForEos || ++idlePolls >= 20) break
+                }
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    outputFormat = codec.outputFormat
+                    idlePolls = 0
+                }
                 else -> {
                     if (outputIndex >= 0) {
-                        val buffer = codec.getOutputBuffer(outputIndex)
-                        if (buffer != null && info.size > 0) {
-                            buffer.position(info.offset)
-                            buffer.limit(info.offset + info.size)
-                            val data = ByteArray(info.size)
-                            buffer.get(data)
-                            output +=
-                                EncodedAudioFrame(
-                                    data = data,
-                                    presentationTimeUs = info.presentationTimeUs,
-                                    flags = info.flags,
-                                )
+                        idlePolls = 0
+                        val isCodecConfig =
+                            info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                        if (!isCodecConfig && info.size > 0) {
+                            codec.getOutputBuffer(outputIndex)?.let { buffer ->
+                                buffer.position(info.offset)
+                                buffer.limit(info.offset + info.size)
+                                val data = ByteArray(info.size)
+                                buffer.get(data)
+                                output +=
+                                    EncodedAudioFrame(
+                                        data = data,
+                                        presentationTimeUs = info.presentationTimeUs,
+                                        flags = info.flags,
+                                    )
+                            }
                         }
+
+                        val eos = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                         codec.releaseOutputBuffer(outputIndex, false)
+                        if (eos) break
                     }
                 }
             }

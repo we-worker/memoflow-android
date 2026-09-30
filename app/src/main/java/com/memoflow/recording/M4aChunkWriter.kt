@@ -1,11 +1,112 @@
 package com.memoflow.recording
-import android.media.*
-import com.memoflow.domain.*
+
+import android.media.MediaCodec
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import com.memoflow.domain.AudioChunk
+import com.memoflow.domain.ChunkState
+import com.memoflow.domain.EncodedAudioFrame
 import java.io.File
 import java.security.MessageDigest
-class M4aChunkWriter(private val dir:File,private val sampleRate:Int=16000,private val channels:Int=1,private val bitrate:Int=24000){ var currentId:String=""; private var mux:MediaMuxer?=null;private var track=-1;private var file:File?=null;private var start=0L
- fun start(){dir.mkdirs();file=File(dir,"chunk_"+System.currentTimeMillis()+".part");currentId=file!!.nameWithoutExtension;mux=MediaMuxer(file!!.absolutePath,MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);track=-1;start=System.currentTimeMillis()}
- fun write(f:EncodedAudioFrame){val m=mux?:return;if(track<0)return;val info=MediaCodec.BufferInfo();info.set(0,f.data.size,f.presentationTimeUs,f.flags);m.writeSampleData(track,java.nio.ByteBuffer.wrap(f.data),info)}
- fun onFormat(format:MediaFormat){val m=mux?:return;if(track<0){track=m.addTrack(format);m.start()}}
- fun finish():AudioChunk?{val m=mux?:return null;runCatching{m.stop();m.release()};val p=file?:return null;val out=File(p.parent,p.name.removeSuffix(".part")+".m4a");p.renameTo(out);val end=System.currentTimeMillis();val bytes=out.readBytes();val sha=MessageDigest.getInstance("SHA-256").digest(bytes).joinToString(""){ "%02x".format(it)};mux=null;return AudioChunk(out.name.substringBefore('.'),"android-device",start,end,end-start,out.absolutePath,"aac-lc","m4a",sampleRate,channels,bitrate,bytes.size.toLong(),sha,ChunkState.COMPLETE)}
+
+class M4aChunkWriter(
+    private val dir: File,
+    private val sampleRate: Int = 16000,
+    private val channels: Int = 1,
+    private val bitrate: Int = 24000,
+) {
+    var currentId: String = ""
+        private set
+
+    private var muxer: MediaMuxer? = null
+    private var trackIndex = -1
+    private var muxerStarted = false
+    private var file: File? = null
+    private var startTimeMs = 0L
+
+    fun start() {
+        dir.mkdirs()
+        file = File(dir, "chunk_" + System.currentTimeMillis() + ".part")
+        currentId = file!!.nameWithoutExtension
+        muxer = MediaMuxer(file!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        trackIndex = -1
+        muxerStarted = false
+        startTimeMs = System.currentTimeMillis()
+    }
+
+    fun onFormat(format: MediaFormat) {
+        val muxer = muxer ?: return
+        if (!muxerStarted) {
+            trackIndex = muxer.addTrack(format)
+            muxer.start()
+            muxerStarted = true
+        }
+    }
+
+    fun write(frame: EncodedAudioFrame) {
+        val muxer = muxer ?: return
+        if (!muxerStarted || trackIndex < 0 || frame.data.isEmpty()) return
+
+        val info =
+            MediaCodec.BufferInfo().apply {
+                set(0, frame.data.size, frame.presentationTimeUs, frame.flags)
+            }
+        muxer.writeSampleData(trackIndex, java.nio.ByteBuffer.wrap(frame.data), info)
+    }
+
+    fun finish(): AudioChunk? {
+        val muxer = muxer ?: return null
+        val partFile = file ?: return null
+
+        var valid = muxerStarted && trackIndex >= 0
+        try {
+            if (muxerStarted) muxer.stop()
+        } catch (_: Exception) {
+            valid = false
+        } finally {
+            runCatching { muxer.release() }
+            this.muxer = null
+        }
+
+        if (!valid) {
+            partFile.delete()
+            return null
+        }
+
+        val outputFile = File(partFile.parentFile, partFile.name.removeSuffix(".part") + ".m4a")
+        if (!partFile.renameTo(outputFile) || !outputFile.exists() || outputFile.length() <= 0L) {
+            partFile.delete()
+            outputFile.delete()
+            return null
+        }
+
+        val endTimeMs = System.currentTimeMillis()
+        val digest = MessageDigest.getInstance("SHA-256")
+        outputFile.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        val checksum = digest.digest().joinToString("") { "%02x".format(it) }
+
+        return AudioChunk(
+            id = outputFile.name.substringBefore('.'),
+            deviceId = "android-device",
+            startTimeUtcMs = startTimeMs,
+            endTimeUtcMs = endTimeMs,
+            durationMs = endTimeMs - startTimeMs,
+            audioPath = outputFile.absolutePath,
+            codec = "aac-lc",
+            container = "m4a",
+            sampleRate = sampleRate,
+            channels = channels,
+            bitrate = bitrate,
+            fileSize = outputFile.length(),
+            checksumSha256 = checksum,
+            state = ChunkState.COMPLETE,
+        )
+    }
 }
