@@ -88,6 +88,7 @@ class LocalSherpaAsrEngine(
                                 encoder = File(dir, "encoder.int8.onnx").absolutePath,
                                 decoder = File(dir, "decoder.int8.onnx").absolutePath,
                                 tokenizer = File(dir, "tokenizer").absolutePath,
+                                maxNewTokens = 512,
                             ),
                         numThreads = THREADS,
                         provider = "cpu",
