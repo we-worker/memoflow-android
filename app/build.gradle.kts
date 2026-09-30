@@ -9,8 +9,11 @@ plugins {
 }
 
 val sherpaVersion = "1.13.8"
-val sileroVadUrl =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+val sileroVadUrls =
+    listOf(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx?download=1",
+        "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/271935959",
+    )
 val sileroVadSha256 =
     "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
 val generatedVadAssetsDir = layout.buildDirectory.dir("generated/silero-vad-assets")
@@ -31,17 +34,42 @@ val downloadSileroVad by tasks.registering {
         }
 
         file.parentFile.mkdirs()
-        val connection =
-            URI(sileroVadUrl).toURL().openConnection().apply {
-                connectTimeout = 20_000
-                readTimeout = 60_000
-                setRequestProperty("User-Agent", "MemoFlow-Android-Build")
+        var lastError: Throwable? = null
+        var downloaded: ByteArray? = null
+
+        for (url in sileroVadUrls) {
+            repeat(4) { attempt ->
+                try {
+                    val connection =
+                        URI(url).toURL().openConnection().apply {
+                            connectTimeout = 20_000
+                            readTimeout = 60_000
+                            setRequestProperty("User-Agent", "MemoFlow-Android-Build")
+                            if (url.contains("api.github.com")) {
+                                setRequestProperty("Accept", "application/octet-stream")
+                                setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+                            }
+                        }
+                    val bytes = connection.getInputStream().use { it.readBytes() }
+                    val actual = sha256(bytes)
+                    check(actual == sileroVadSha256) {
+                        "silero_vad.onnx SHA-256 mismatch: expected " +
+                            sileroVadSha256 + ", got " + actual
+                    }
+                    downloaded = bytes
+                    return@repeat
+                } catch (error: Throwable) {
+                    lastError = error
+                    Thread.sleep(1_000L * (attempt + 1))
+                }
             }
-        val bytes = connection.getInputStream().use { it.readBytes() }
-        val actual = sha256(bytes)
-        check(actual == sileroVadSha256) {
-            "silero_vad.onnx SHA-256 mismatch: expected " + sileroVadSha256 + ", got " + actual
+            if (downloaded != null) break
         }
+
+        val bytes = downloaded ?: throw GradleException(
+            "Unable to download silero_vad.onnx after retries",
+            lastError,
+        )
         file.writeBytes(bytes)
     }
 }
