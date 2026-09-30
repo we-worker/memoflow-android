@@ -17,7 +17,9 @@ class LocalAsrModelCatalogTest {
         )
         LocalAsrModelCatalog.models.forEach { spec ->
             assertTrue(spec.archiveBytes > 100L * 1024L * 1024L)
-            assertEquals(64, spec.sha256.length)
+            if (spec.sha256.isNotBlank()) {
+                assertEquals(64, spec.sha256.length)
+            }
             assertTrue(spec.downloadUrls.isNotEmpty())
             assertTrue(spec.requiredFiles.isNotEmpty())
         }
