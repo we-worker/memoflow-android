@@ -62,12 +62,23 @@ fun EchoApp(
     val localModels by viewModel.localModels.collectAsState()
 
     var section by rememberSaveable { mutableStateOf(EchoSection.Today) }
+    val sectionHistory = remember { mutableStateListOf<EchoSection>() }
     var detailId by rememberSaveable { mutableStateOf<String?>(null) }
     val detailChunk = chunks.firstOrNull { it.id == detailId }
 
-    BackHandler(enabled = detailChunk != null || section != EchoSection.Today) {
+    fun navigateSection(target: EchoSection) {
+        if (target == section) return
+        sectionHistory += section
+        section = target
+    }
+
+    BackHandler(
+        enabled = detailChunk != null || sectionHistory.isNotEmpty() || section != EchoSection.Today,
+    ) {
         if (detailChunk != null) {
             detailId = null
+        } else if (sectionHistory.isNotEmpty()) {
+            section = sectionHistory.removeAt(sectionHistory.lastIndex)
         } else {
             section = EchoSection.Today
         }
@@ -91,7 +102,7 @@ fun EchoApp(
                         EchoSection.entries.forEach { item ->
                             NavigationBarItem(
                                 selected = section == item,
-                                onClick = { section = item },
+                                onClick = { navigateSection(item) },
                                 icon = { Icon(item.icon, item.label) },
                                 label = { Text(item.label) },
                                 colors =
