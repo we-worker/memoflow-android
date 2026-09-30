@@ -1,9 +1,11 @@
 package com.memoflow.processing
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
@@ -125,6 +127,10 @@ class AudioPostProcessWorker(
 
         extractor.selectTrack(audioTrack)
         val mime = trackFormat!!.getString(MediaFormat.KEY_MIME)!!
+        trackFormat.setInteger(
+            MediaFormat.KEY_PCM_ENCODING,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
         val decoder = MediaCodec.createDecoderByType(mime)
         decoder.configure(trackFormat, null, null, 0)
         decoder.start()
@@ -334,6 +340,7 @@ class AudioPostProcessWorker(
 
     companion object {
         private const val KEY_CHUNK_ID = "chunk_id"
+        private const val POST_PROCESS_QUEUE = "post-vad-queue"
         const val KEY_RANGE_COUNT = "range_count"
         const val KEY_SPEECH_DURATION_MS = "speech_duration_ms"
 
@@ -349,11 +356,16 @@ class AudioPostProcessWorker(
             val request =
                 OneTimeWorkRequestBuilder<AudioPostProcessWorker>()
                     .setInputData(workDataOf(KEY_CHUNK_ID to chunkId))
+                    .setConstraints(
+                        Constraints.Builder()
+                            .setRequiresBatteryNotLow(true)
+                            .build(),
+                    )
                     .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "post-vad-" + chunkId,
-                ExistingWorkPolicy.KEEP,
+                POST_PROCESS_QUEUE,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
                 request,
             )
         }
