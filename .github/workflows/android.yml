@@ -49,7 +49,7 @@ jobs:
       - name: Install test dependencies
         run: pip install -r pc_server/requirements-ci.txt
       - name: Test FastAPI endpoints
-        run: pytest -q pc_server/tests
+        run: PYTHONPATH=. pytest -q pc_server/tests
 
   android-instrumentation:
     runs-on: ubuntu-latest
