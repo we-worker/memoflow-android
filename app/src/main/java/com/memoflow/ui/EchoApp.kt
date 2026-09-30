@@ -621,7 +621,7 @@ private fun RecordingDetailScreen(
                     Column(Modifier.weight(1f)) {
                         Text("ASR 转写", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "由你配置的 PC 服务处理，结果按 chunk + offset 保存。",
+                            "使用设置中选择的 ASR 引擎处理；本地、PC、阿里云和豆包最终统一写入 chunk + offset 转写结果。",
                             color = EchoMuted,
                             fontSize = 12.sp,
                         )
@@ -1080,12 +1080,12 @@ private fun ConnectScreen(
 
     Page(
         title = "电脑与 MCP",
-        subtitle = "手机负责稳定记录，电脑负责 ASR 与后续 AI 处理。",
+        subtitle = "手机稳定记录；PC 用于同步，也可以作为可选 ASR/AI 处理端。",
         modifier = modifier,
     ) {
         InfoPanel(
             "PC Processing Server",
-            "填写运行 pc_server 的电脑地址和同一把固定访问密钥。同步、健康检查和 ASR 都会携带 X-MemoFlow-Key。",
+            "填写运行 pc_server 的电脑地址和同一把固定访问密钥。同步、健康检查，以及选择 PC ASR 时的转写请求都会携带 X-MemoFlow-Key。",
         )
         OutlinedTextField(
             value = url,
