@@ -50,23 +50,7 @@ class SherpaOnnxSileroVadEngine(
         }
 
         val output = mutableListOf<AudioRange>()
-        var byteIndex = 0
-        while (byteIndex + 1 < frame.pcm.size) {
-            val sample =
-                ((frame.pcm[byteIndex].toInt() and 0xff) or
-                    (frame.pcm[byteIndex + 1].toInt() shl 8))
-                    .toShort()
-                    .toInt()
-
-            window[windowFill++] = sample / 32768.0f
-            byteIndex += 2
-
-            if (windowFill == windowSize) {
-                vad.acceptWaveform(window)
-                windowFill = 0
-                drain(output)
-            }
-        }
+        acceptPcm(frame.pcm, output)
         return output
     }
 
@@ -88,6 +72,55 @@ class SherpaOnnxSileroVadEngine(
 
     override suspend fun close() {
         vad.release()
+    }
+
+    /**
+     * Synchronous JNI smoke hook used only by Android instrumentation tests.
+     * Keeping the test call reflective prevents AndroidJUnit from loading native
+     * sherpa classes while it is merely discovering the test class.
+     */
+    fun smokeTestPcm(pcm: ByteArray): Int {
+        val output = mutableListOf<AudioRange>()
+        acceptPcm(pcm, output)
+        return output.size
+    }
+
+    fun smokeFlush(): Int {
+        val output = mutableListOf<AudioRange>()
+        if (windowFill > 0) {
+            vad.acceptWaveform(window.copyOf(windowFill))
+            windowFill = 0
+        }
+        vad.flush()
+        drain(output)
+        return output.size
+    }
+
+    fun smokeRelease() {
+        vad.release()
+    }
+
+    private fun acceptPcm(
+        pcm: ByteArray,
+        output: MutableList<AudioRange>,
+    ) {
+        var byteIndex = 0
+        while (byteIndex + 1 < pcm.size) {
+            val sample =
+                ((pcm[byteIndex].toInt() and 0xff) or
+                    (pcm[byteIndex + 1].toInt() shl 8))
+                    .toShort()
+                    .toInt()
+
+            window[windowFill++] = sample / 32768.0f
+            byteIndex += 2
+
+            if (windowFill == windowSize) {
+                vad.acceptWaveform(window)
+                windowFill = 0
+                drain(output)
+            }
+        }
     }
 
     private fun drain(output: MutableList<AudioRange>) {
