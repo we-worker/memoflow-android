@@ -26,6 +26,7 @@ data class AudioChunkEntity(
     val waveformPath: String? = null,
     val postProcessState: String = "PENDING",
     val originalAvailable: Boolean = true,
+    val appliedVadEngine: String = "",
     val appliedVadThreshold: Float = -1f,
     val appliedVadMergeSilenceMs: Long = -1L,
 )
@@ -125,6 +126,7 @@ interface ChunkDao {
             speechDurationMs = :speechDurationMs,
             waveformPath = :waveformPath,
             postProcessState = :state,
+            appliedVadEngine = :appliedVadEngine,
             appliedVadThreshold = :appliedVadThreshold,
             appliedVadMergeSilenceMs = :appliedVadMergeSilenceMs
         WHERE id = :id
@@ -135,6 +137,7 @@ interface ChunkDao {
         speechDurationMs: Long,
         waveformPath: String?,
         state: String,
+        appliedVadEngine: String,
         appliedVadThreshold: Float,
         appliedVadMergeSilenceMs: Long,
     )
@@ -173,7 +176,7 @@ interface ChunkDao {
 
 @Database(
     entities = [AudioChunkEntity::class, AudioRangeEntity::class, TranscriptSegmentEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class MemoDatabase : RoomDatabase() {
