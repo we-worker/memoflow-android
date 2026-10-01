@@ -75,7 +75,7 @@ class RecordingForegroundService : Service() {
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("回声正在记录")
-            .setContentText("低功耗录音中；VAD 在充电或结束记录后处理")
+            .setContentText("低功耗录音中；VAD/波形在充电或打开详情时处理")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(
@@ -146,23 +146,6 @@ class RecordingForegroundService : Service() {
                 .getInt(KEY_CHUNK_DURATION_MINUTES, DEFAULT_CHUNK_DURATION_MINUTES)
                 .coerceIn(MIN_CHUNK_DURATION_MINUTES, MAX_CHUNK_DURATION_MINUTES)
         return minutes * 60_000L
-    }
-
-    private suspend fun finalizeEncoderIntoWriter(
-        encoder: AacMediaCodecEncoder,
-        writer: M4aChunkWriter,
-    ) {
-        val tail = encoder.flush()
-        encoder.outputFormat?.let(writer::onFormat)
-        tail.forEach(writer::write)
-        encoder.close()
-    }
-
-    private suspend fun finishChunkAndDeferPostProcess(writer: M4aChunkWriter): String? {
-        val chunk = writer.finish() ?: return null
-        db.chunks().upsert(chunk.toEntity())
-        AudioPostProcessWorker.enqueueDeferred(this, chunk.id)
-        return chunk.id
     }
 
     private fun stopRecording() {
