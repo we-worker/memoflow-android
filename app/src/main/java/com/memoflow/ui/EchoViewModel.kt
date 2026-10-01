@@ -9,6 +9,7 @@ import com.memoflow.data.*
 import com.memoflow.domain.AsrEngine
 import com.memoflow.domain.AudioReference
 import com.memoflow.processing.AudioPostProcessWorker
+import com.memoflow.processing.AudioWaveformExtractor
 import com.memoflow.processing.WaveformStore
 import com.memoflow.recording.RemoteAsrEngine
 import com.memoflow.service.BootReceiver
@@ -33,6 +34,7 @@ data class EchoSettings(
     val vadBackend: VadBackend = VadBackend.SILERO,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
     val vadSegmentGapMinutes: Int = RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
+    val chunkDurationMinutes: Int = RecordingForegroundService.DEFAULT_CHUNK_DURATION_MINUTES,
     val cleanupRetentionDays: Int = 7,
 )
 
@@ -113,6 +115,23 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
             if (path.isNullOrBlank()) emptyList() else WaveformStore.read(File(path))
         }
 
+    suspend fun loadSpeechWaveform(audioPath: String?): List<Float> =
+        withContext(Dispatchers.IO) {
+            if (audioPath.isNullOrBlank()) return@withContext emptyList()
+            val audio = File(audioPath)
+            if (!audio.exists()) return@withContext emptyList()
+
+            val sidecar = WaveformStore.sidecarForAudio(audio)
+            val cached = WaveformStore.read(sidecar)
+            if (cached.isNotEmpty()) return@withContext cached
+
+            // Compatibility path for speech-only files produced by older builds:
+            // decode once on demand, persist a sidecar, and reuse it afterwards.
+            val extracted = AudioWaveformExtractor.extract(audio)
+            if (extracted.isNotEmpty()) WaveformStore.write(sidecar, extracted)
+            extracted
+        }
+
     fun saveBaseUrl(value: String) {
         val cleaned = value.trim().trimEnd('/')
         syncPrefs.edit().putString(ChunkSyncWorker.KEY_BASE_URL, cleaned).apply()
@@ -134,6 +153,18 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     fun setAutoResume(enabled: Boolean) {
         recordingPrefs.edit().putBoolean(BootReceiver.KEY_AUTO_START, enabled).apply()
         _settings.value = _settings.value.copy(autoResume = enabled)
+    }
+
+    fun setChunkDurationMinutes(minutes: Int) {
+        val safe =
+            minutes.coerceIn(
+                RecordingForegroundService.MIN_CHUNK_DURATION_MINUTES,
+                RecordingForegroundService.MAX_CHUNK_DURATION_MINUTES,
+            )
+        recordingPrefs.edit()
+            .putInt(RecordingForegroundService.KEY_CHUNK_DURATION_MINUTES, safe)
+            .apply()
+        _settings.value = _settings.value.copy(chunkDurationMinutes = safe)
     }
 
     fun setVadBackend(backend: VadBackend) {
@@ -420,7 +451,11 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 File(chunk.audioPath).delete()
-                chunk.speechAudioPath?.let { File(it).delete() }
+                chunk.speechAudioPath?.let { path ->
+                    val speech = File(path)
+                    WaveformStore.sidecarForAudio(speech).delete()
+                    speech.delete()
+                }
                 chunk.waveformPath?.let { File(it).delete() }
             }
             dao.deleteBundle(chunk.id)
@@ -463,6 +498,14 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                     RecordingForegroundService.KEY_VAD_SEGMENT_GAP_MINUTES,
                     RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
                 ).coerceIn(1, 10),
+            chunkDurationMinutes =
+                recordingPrefs.getInt(
+                    RecordingForegroundService.KEY_CHUNK_DURATION_MINUTES,
+                    RecordingForegroundService.DEFAULT_CHUNK_DURATION_MINUTES,
+                ).coerceIn(
+                    RecordingForegroundService.MIN_CHUNK_DURATION_MINUTES,
+                    RecordingForegroundService.MAX_CHUNK_DURATION_MINUTES,
+                ),
             cleanupRetentionDays =
                 recordingPrefs.getInt(KEY_CLEANUP_RETENTION_DAYS, 7).coerceIn(1, 30),
         )

@@ -75,7 +75,7 @@ class RecordingForegroundService : Service() {
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("回声正在记录")
-            .setContentText("录音阶段只做 AAC/M4A；每个 chunk 完成后再后台 VAD")
+            .setContentText("低功耗录音中；VAD 在充电或结束记录后处理")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
             .setContentIntent(
@@ -103,6 +103,8 @@ class RecordingForegroundService : Service() {
         var encoder = AacMediaCodecEncoder()
         var writer = M4aChunkWriter(File(filesDir, "audio"))
         var chunkStartMs = System.currentTimeMillis()
+        var chunkDurationMs = currentChunkDurationMs()
+        val sessionChunkIds = linkedSetOf<String>()
 
         try {
             source.start()
@@ -116,24 +118,44 @@ class RecordingForegroundService : Service() {
                 encoder.outputFormat?.let(writer::onFormat)
                 encoded.forEach(writer::write)
 
-                if (System.currentTimeMillis() - chunkStartMs >= CHUNK_DURATION_MS) {
+                if (System.currentTimeMillis() - chunkStartMs >= chunkDurationMs) {
                     finalizeEncoderIntoWriter(encoder, writer)
-                    finishChunkAndEnqueuePostProcess(writer)
+                    finishChunkAndDeferPostProcess(writer)?.let(sessionChunkIds::add)
 
                     encoder = AacMediaCodecEncoder()
                     encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
                     writer = M4aChunkWriter(File(filesDir, "audio")).also { it.start() }
                     chunkStartMs = System.currentTimeMillis()
+                    // A settings change applies to the next chunk, avoiding a
+                    // SharedPreferences read in the hot recording loop.
+                    chunkDurationMs = currentChunkDurationMs()
                 }
             }
         } finally {
             withContext(NonCancellable) {
                 runCatching { finalizeEncoderIntoWriter(encoder, writer) }
-                runCatching { finishChunkAndEnqueuePostProcess(writer) }
+                runCatching {
+                    finishChunkAndDeferPostProcess(writer)?.let(sessionChunkIds::add)
+                }
                 runCatching { encoder.close() }
                 runCatching { source.stop() }
+
+                // While recording, post-processing waits for charging. Once the user
+                // explicitly stops recording, replace those constrained jobs with
+                // immediate jobs so the new VAD/speech-only results become available.
+                sessionChunkIds.forEach { chunkId ->
+                    AudioPostProcessWorker.enqueue(this@RecordingForegroundService, chunkId)
+                }
             }
         }
+    }
+
+    private fun currentChunkDurationMs(): Long {
+        val minutes =
+            getSharedPreferences(PREFS_RECORDING, Context.MODE_PRIVATE)
+                .getInt(KEY_CHUNK_DURATION_MINUTES, DEFAULT_CHUNK_DURATION_MINUTES)
+                .coerceIn(MIN_CHUNK_DURATION_MINUTES, MAX_CHUNK_DURATION_MINUTES)
+        return minutes * 60_000L
     }
 
     private suspend fun finalizeEncoderIntoWriter(
@@ -146,11 +168,11 @@ class RecordingForegroundService : Service() {
         encoder.close()
     }
 
-    private suspend fun finishChunkAndEnqueuePostProcess(writer: M4aChunkWriter) {
-        writer.finish()?.let { chunk ->
-            db.chunks().upsert(chunk.toEntity())
-            AudioPostProcessWorker.enqueue(this, chunk.id)
-        }
+    private suspend fun finishChunkAndDeferPostProcess(writer: M4aChunkWriter): String? {
+        val chunk = writer.finish() ?: return null
+        db.chunks().upsert(chunk.toEntity())
+        AudioPostProcessWorker.enqueueDeferred(this, chunk.id)
+        return chunk.id
     }
 
     private fun stopRecording() {
@@ -194,11 +216,14 @@ class RecordingForegroundService : Service() {
         const val DEFAULT_FIRERED_THRESHOLD = 0.4f
         const val KEY_VAD_SEGMENT_GAP_MINUTES = "vad_segment_gap_minutes"
         const val DEFAULT_VAD_SEGMENT_GAP_MINUTES = 5
+        const val KEY_CHUNK_DURATION_MINUTES = "chunk_duration_minutes"
+        const val DEFAULT_CHUNK_DURATION_MINUTES = 10
+        const val MIN_CHUNK_DURATION_MINUTES = 5
+        const val MAX_CHUNK_DURATION_MINUTES = 60
 
         private const val NOTIFICATION_ID = 7
-        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_RATE = 16_000
         private const val CHANNELS = 1
-        private const val BITRATE = 24000
-        private const val CHUNK_DURATION_MS = 10 * 60 * 1000L
+        private const val BITRATE = 24_000
     }
 }

@@ -1,7 +1,15 @@
 package com.memoflow.data
 
 import android.content.Context
-import androidx.work.*
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -114,20 +122,45 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
         const val KEY_API_KEY = "api_key"
         const val API_KEY_HEADER = "X-MemoFlow-Key"
 
-        fun schedule(context: Context) {
+        private const val PERIODIC_WORK_NAME = "memoflow-sync"
+        private const val EVENT_WORK_NAME = "memoflow-sync-event"
+        private const val FALLBACK_SYNC_HOURS = 6L
+
+        private fun networkConstraint(context: Context, batteryNotLow: Boolean): Constraints {
             val prefs = context.getSharedPreferences(PREFS_SYNC, Context.MODE_PRIVATE)
             val wifiOnly = prefs.getBoolean("wifi_only", true)
             val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
 
+            return Constraints.Builder()
+                .setRequiredNetworkType(networkType)
+                .setRequiresBatteryNotLow(batteryNotLow)
+                .build()
+        }
+
+        /**
+         * Low-frequency safety net. Normal uploads are event driven from completed
+         * post-processing work; this periodic job only catches missed/retried items.
+         */
+        fun schedule(context: Context) {
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                "memoflow-sync",
+                PERIODIC_WORK_NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
-                PeriodicWorkRequestBuilder<ChunkSyncWorker>(15, TimeUnit.MINUTES)
-                    .setConstraints(
-                        Constraints.Builder()
-                            .setRequiredNetworkType(networkType)
-                            .build(),
-                    )
+                PeriodicWorkRequestBuilder<ChunkSyncWorker>(
+                    FALLBACK_SYNC_HOURS,
+                    TimeUnit.HOURS,
+                )
+                    .setConstraints(networkConstraint(context, batteryNotLow = true))
+                    .build(),
+            )
+        }
+
+        /** Coalesced event-driven sync after a chunk becomes ready for upload. */
+        fun enqueue(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                EVENT_WORK_NAME,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                OneTimeWorkRequestBuilder<ChunkSyncWorker>()
+                    .setConstraints(networkConstraint(context, batteryNotLow = true))
                     .build(),
             )
         }

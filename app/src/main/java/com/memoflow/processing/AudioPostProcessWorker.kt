@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMuxer
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -12,21 +13,22 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.memoflow.data.ChunkSyncWorker
 import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
 import com.memoflow.domain.AudioFrame
 import com.memoflow.domain.AudioRange
 import com.memoflow.domain.VadEngine
-import com.memoflow.recording.AacMediaCodecEncoder
-import com.memoflow.recording.M4aChunkWriter
 import com.memoflow.recording.SherpaOnnxSileroVadEngine
 import com.memoflow.service.RecordingForegroundService
 import com.memoflow.vad.FireRedVadEngine
 import com.memoflow.vad.VadBackend
 import java.io.File
-import java.io.FileOutputStream
-import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class AudioPostProcessWorker(
@@ -34,21 +36,30 @@ class AudioPostProcessWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val chunkId = inputData.getString(KEY_CHUNK_ID) ?: return@withContext Result.failure()
-        val dao = MemoDatabase.get(applicationContext).chunks()
-        val chunk = dao.getChunk(chunkId) ?: return@withContext Result.failure()
-        val original = File(chunk.audioPath)
+    override suspend fun doWork(): Result =
+        processMutex.withLock {
+            withContext(Dispatchers.IO) {
+                doWorkLocked()
+            }
+        }
 
+    private suspend fun doWorkLocked(): Result {
+        val chunkId = inputData.getString(KEY_CHUNK_ID) ?: return Result.failure()
+        val dao = MemoDatabase.get(applicationContext).chunks()
+        val chunk = dao.getChunk(chunkId) ?: return Result.failure()
+
+        // A deferred charging job may already have completed before the stop-recording
+        // replacement job runs. Avoid decoding/processing the same chunk twice.
+        if (chunk.postProcessState == "DONE") return Result.success()
+
+        val original = File(chunk.audioPath)
         if (!original.exists()) {
             dao.updatePostProcessState(chunkId, "FAILED")
-            return@withContext Result.failure()
+            return Result.failure()
         }
 
         dao.updatePostProcessState(chunkId, "PROCESSING")
 
-        val tempDir = File(applicationContext.cacheDir, "postprocess").apply { mkdirs() }
-        val pcmFile = File(tempDir, chunkId + ".pcm")
         val waveformFile =
             File(applicationContext.filesDir, "waveforms/" + chunkId + ".waveform")
 
@@ -85,10 +96,11 @@ class AudioPostProcessWorker(
                     RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
                 ).coerceIn(1, 10) * 60_000L
 
+            // Decode once and stream PCM directly to VAD + waveform. No 20-30 MB
+            // temporary PCM file is written for every chunk.
             val analysis =
                 decodeAnalyze(
                     source = original,
-                    pcmFile = pcmFile,
                     waveformFile = waveformFile,
                     backend = backend,
                     threshold = threshold,
@@ -100,18 +112,23 @@ class AudioPostProcessWorker(
                     durationMs = chunk.durationMs,
                 )
 
+            // speech-only is now built by copying encoded AAC samples from the
+            // original M4A. This removes the second PCM read and AAC re-encode.
             val speech =
                 buildSpeechOnlyAudio(
                     chunkId = chunkId,
-                    pcmFile = pcmFile,
-                    // speech-only 必须使用底层 VAD detection，而不是 5 分钟规则合并后的
-                    // Conversation Session；否则会把会话内部的长静音也编码进去。
+                    source = original,
                     ranges = analysis.ranges,
                     originalDurationMs = chunk.durationMs,
+                    originalWaveform = analysis.waveform,
                 )
 
             if (speech == null) {
-                chunk.speechAudioPath?.let { File(it).delete() }
+                chunk.speechAudioPath?.let { oldPath ->
+                    val old = File(oldPath)
+                    WaveformStore.sidecarForAudio(old).delete()
+                    old.delete()
+                }
             }
 
             dao.replaceRanges(chunkId, sessions.map { it.toEntity(chunkId) })
@@ -126,23 +143,25 @@ class AudioPostProcessWorker(
                 appliedVadMergeSilenceMs = mergeSilenceMs,
             )
 
-            Result.success(
+            // Normal PC sync is event-driven once the chunk has complete VAD metadata.
+            ChunkSyncWorker.enqueue(applicationContext)
+
+            return Result.success(
                 workDataOf(
                     KEY_RANGE_COUNT to analysis.ranges.size,
                     KEY_SPEECH_DURATION_MS to (speech?.durationMs ?: 0L),
                 ),
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) {
             dao.updatePostProcessState(chunkId, "FAILED")
-            Result.failure()
-        } finally {
-            pcmFile.delete()
+            return Result.failure()
         }
     }
 
     private suspend fun decodeAnalyze(
         source: File,
-        pcmFile: File,
         waveformFile: File,
         backend: VadBackend,
         threshold: Float,
@@ -192,7 +211,6 @@ class AudioPostProcessWorker(
             }
         val ranges = mutableListOf<AudioRange>()
         val waveform = WaveformAccumulator()
-        val output = FileOutputStream(pcmFile)
 
         var inputDone = false
         var outputDone = false
@@ -246,7 +264,6 @@ class AudioPostProcessWorker(
                             val bytes = ByteArray(info.size)
                             buffer.get(bytes)
 
-                            output.write(bytes)
                             waveform.accept(bytes)
                             ranges +=
                                 vad.process(
@@ -267,10 +284,10 @@ class AudioPostProcessWorker(
             }
 
             ranges += vad.flush()
-            WaveformStore.write(waveformFile, waveform.finish())
-            return AnalysisResult(ranges)
+            val waveformValues = waveform.finish()
+            WaveformStore.write(waveformFile, waveformValues)
+            return AnalysisResult(ranges, waveformValues)
         } finally {
-            runCatching { output.close() }
             runCatching { vad.close() }
             runCatching { decoder.stop() }
             runCatching { decoder.release() }
@@ -278,79 +295,186 @@ class AudioPostProcessWorker(
         }
     }
 
-    private suspend fun buildSpeechOnlyAudio(
+    private fun buildSpeechOnlyAudio(
         chunkId: String,
-        pcmFile: File,
+        source: File,
         ranges: List<AudioRange>,
         originalDurationMs: Long,
+        originalWaveform: List<Float>,
     ): SpeechFile? {
-        if (ranges.isEmpty() || !pcmFile.exists()) return null
+        if (ranges.isEmpty() || !source.exists()) return null
 
         val padded = mergeForCropping(ranges, originalDurationMs)
         if (padded.isEmpty()) return null
 
         val outputDir = File(applicationContext.filesDir, "speech").apply { mkdirs() }
-        val encoder = AacMediaCodecEncoder()
-        val writer = M4aChunkWriter(outputDir)
-        val source = RandomAccessFile(pcmFile, "r")
+        val target = File(outputDir, chunkId + "_speech.m4a")
+        val temp = File(outputDir, chunkId + "_speech.new.m4a")
+        temp.delete()
 
-        writer.start()
-        encoder.open(SAMPLE_RATE, 1, BITRATE)
+        val extractor = MediaExtractor()
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
 
         try {
-            val buffer = ByteArray(PCM_BLOCK_BYTES)
+            extractor.setDataSource(source.absolutePath)
+            var sourceTrack = -1
+            var sourceFormat: MediaFormat? = null
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                if (format.getString(MediaFormat.KEY_MIME).orEmpty().startsWith("audio/")) {
+                    sourceTrack = index
+                    sourceFormat = format
+                    break
+                }
+            }
+            require(sourceTrack >= 0 && sourceFormat != null) {
+                "No audio track in " + source.name
+            }
+
+            extractor.selectTrack(sourceTrack)
+            val sampleRate =
+                sourceFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE).coerceAtLeast(1)
+            val frameDurationUs = AAC_FRAME_SAMPLES * 1_000_000L / sampleRate
+            val maxInputSize =
+                if (sourceFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    sourceFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE)
+                } else {
+                    DEFAULT_REMUX_BUFFER_BYTES
+                }.coerceAtLeast(DEFAULT_REMUX_BUFFER_BYTES)
+
+            muxer = MediaMuxer(temp.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val targetTrack = muxer.addTrack(sourceFormat)
+            muxer.start()
+            muxerStarted = true
+
+            val buffer = ByteBuffer.allocate(maxInputSize)
+            val info = MediaCodec.BufferInfo()
+            var outputBaseUs = 0L
+            var wroteAny = false
+
             for (range in padded) {
-                val startByte = msToByteOffset(range.first)
-                val endByte = msToByteOffset(range.last + 1)
-                source.seek(startByte.coerceAtMost(source.length()))
+                val startUs = range.first * 1_000L
+                val endUs = (range.last + 1L) * 1_000L
+                extractor.seekTo(startUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
 
-                var remaining =
-                    (endByte - startByte)
-                        .coerceAtLeast(0L)
-                        .coerceAtMost(source.length() - source.filePointer)
+                var firstSourcePtsUs = -1L
+                var lastOutputPtsUs = -1L
 
-                while (remaining > 0L) {
-                    val want = minOf(buffer.size.toLong(), remaining).toInt()
-                    val read = source.read(buffer, 0, want)
-                    if (read <= 0) break
+                while (true) {
+                    val sampleTimeUs = extractor.sampleTime
+                    if (sampleTimeUs < 0L || sampleTimeUs >= endUs) break
+                    if (sampleTimeUs < startUs) {
+                        if (!extractor.advance()) break
+                        continue
+                    }
 
-                    val frameBytes =
-                        if (read == buffer.size) buffer.copyOf() else buffer.copyOf(read)
-                    val encoded =
-                        encoder.encode(
-                            AudioFrame(
-                                pcm = frameBytes,
-                                timestampNs = 0L,
-                                sampleRate = SAMPLE_RATE,
-                                channels = 1,
-                            ),
-                        )
-                    encoder.outputFormat?.let(writer::onFormat)
-                    encoded.forEach(writer::write)
-                    remaining -= read
+                    buffer.clear()
+                    val sampleSize = extractor.readSampleData(buffer, 0)
+                    if (sampleSize < 0) break
+
+                    if (firstSourcePtsUs < 0L) firstSourcePtsUs = sampleTimeUs
+                    val outputPtsUs = outputBaseUs + (sampleTimeUs - firstSourcePtsUs)
+                    info.set(0, sampleSize, outputPtsUs, 0)
+                    muxer.writeSampleData(targetTrack, buffer, info)
+                    wroteAny = true
+                    lastOutputPtsUs = outputPtsUs
+
+                    if (!extractor.advance()) break
+                }
+
+                if (lastOutputPtsUs >= 0L) {
+                    outputBaseUs = lastOutputPtsUs + frameDurationUs
                 }
             }
 
-            val tail = encoder.flush()
-            encoder.outputFormat?.let(writer::onFormat)
-            tail.forEach(writer::write)
+            require(wroteAny) { "No AAC samples selected for speech-only audio" }
+            muxer.stop()
+            muxerStarted = false
+            muxer.release()
+            muxer = null
+
+            require(temp.exists() && temp.length() > 0L) {
+                "speech-only remux produced an empty file"
+            }
+
+            replaceFileSafely(temp, target)
+
+            val speechWaveform =
+                cropWaveform(
+                    waveform = originalWaveform,
+                    ranges = padded,
+                    originalDurationMs = originalDurationMs,
+                )
+            if (speechWaveform.isNotEmpty()) {
+                WaveformStore.write(
+                    WaveformStore.sidecarForAudio(target),
+                    speechWaveform,
+                )
+            }
+
+            return SpeechFile(
+                file = target,
+                durationMs = outputBaseUs / 1_000L,
+            )
         } finally {
-            runCatching { encoder.close() }
-            runCatching { source.close() }
+            if (muxerStarted) runCatching { muxer?.stop() }
+            runCatching { muxer?.release() }
+            runCatching { extractor.release() }
+            temp.delete()
+        }
+    }
+
+    private fun replaceFileSafely(newFile: File, target: File) {
+        val backup = File(target.parentFile, target.name + ".bak")
+        backup.delete()
+
+        if (target.exists()) {
+            require(target.renameTo(backup)) {
+                "Unable to preserve previous " + target.name
+            }
         }
 
-        val generated = writer.finish() ?: return null
-        val generatedFile = File(generated.audioPath)
-        val target = File(outputDir, chunkId + "_speech.m4a")
-        if (target.exists()) target.delete()
-
-        if (!generatedFile.renameTo(target)) {
-            generatedFile.copyTo(target, overwrite = true)
-            generatedFile.delete()
+        try {
+            if (!newFile.renameTo(target)) {
+                newFile.copyTo(target, overwrite = false)
+                newFile.delete()
+            }
+            require(target.exists() && target.length() > 0L) {
+                "Unable to install " + target.name
+            }
+            backup.delete()
+        } catch (error: Throwable) {
+            target.delete()
+            if (backup.exists()) backup.renameTo(target)
+            throw error
         }
+    }
 
-        val duration = padded.sumOf { it.last - it.first + 1L }
-        return SpeechFile(target, duration)
+    private fun cropWaveform(
+        waveform: List<Float>,
+        ranges: List<LongRange>,
+        originalDurationMs: Long,
+    ): List<Float> {
+        if (waveform.isEmpty() || originalDurationMs <= 0L) return emptyList()
+
+        val output = mutableListOf<Float>()
+        for (range in ranges) {
+            val startIndex =
+                ((range.first.toDouble() / originalDurationMs) * waveform.size)
+                    .toInt()
+                    .coerceIn(0, waveform.size)
+            val endIndex =
+                kotlin.math.ceil(
+                    ((range.last + 1L).toDouble() / originalDurationMs) * waveform.size,
+                )
+                    .toInt()
+                    .coerceIn(startIndex, waveform.size)
+            if (endIndex > startIndex) {
+                output += waveform.subList(startIndex, endIndex)
+            }
+        }
+        return output
     }
 
     private fun mergeForCropping(
@@ -382,40 +506,69 @@ class AudioPostProcessWorker(
         return merged
     }
 
-    private fun msToByteOffset(ms: Long): Long =
-        ms * SAMPLE_RATE * BYTES_PER_SAMPLE / 1000L
+    private data class AnalysisResult(
+        val ranges: List<AudioRange>,
+        val waveform: List<Float>,
+    )
 
-    private data class AnalysisResult(val ranges: List<AudioRange>)
-    private data class SpeechFile(val file: File, val durationMs: Long)
+    private data class SpeechFile(
+        val file: File,
+        val durationMs: Long,
+    )
 
     companion object {
         private const val KEY_CHUNK_ID = "chunk_id"
-        private const val POST_PROCESS_QUEUE = "post-vad-queue"
         const val KEY_RANGE_COUNT = "range_count"
         const val KEY_SPEECH_DURATION_MS = "speech_duration_ms"
 
         private const val SAMPLE_RATE = 16_000
-        private const val BITRATE = 24_000
-        private const val BYTES_PER_SAMPLE = 2L
-        private const val PCM_BLOCK_BYTES = 3_200
+        private const val AAC_FRAME_SAMPLES = 1_024L
+        private const val DEFAULT_REMUX_BUFFER_BYTES = 256 * 1024
         private const val PRE_ROLL_MS = 400L
         private const val POST_ROLL_MS = 500L
         private const val MERGE_GAP_MS = 250L
 
+        private val processMutex = Mutex()
+
+        /** Immediate processing: explicit detail view or after recording stops. */
+        @JvmStatic
         fun enqueue(context: Context, chunkId: String) {
+            enqueueInternal(
+                context = context,
+                chunkId = chunkId,
+                requiresCharging = false,
+            )
+        }
+
+        /** During long-running recording, wait until the device is charging. */
+        fun enqueueDeferred(context: Context, chunkId: String) {
+            enqueueInternal(
+                context = context,
+                chunkId = chunkId,
+                requiresCharging = true,
+            )
+        }
+
+        private fun enqueueInternal(
+            context: Context,
+            chunkId: String,
+            requiresCharging: Boolean,
+        ) {
+            val constraints =
+                Constraints.Builder()
+                    .setRequiresBatteryNotLow(true)
+                    .setRequiresCharging(requiresCharging)
+                    .build()
+
             val request =
                 OneTimeWorkRequestBuilder<AudioPostProcessWorker>()
                     .setInputData(workDataOf(KEY_CHUNK_ID to chunkId))
-                    .setConstraints(
-                        Constraints.Builder()
-                            .setRequiresBatteryNotLow(true)
-                            .build(),
-                    )
+                    .setConstraints(constraints)
                     .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
-                POST_PROCESS_QUEUE,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                "post-vad-" + chunkId,
+                ExistingWorkPolicy.REPLACE,
                 request,
             )
         }

@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memoflow.asr.*
 import com.memoflow.data.*
+import com.memoflow.service.RecordingForegroundService
 import com.memoflow.vad.VadBackend
 import java.io.File
 import java.time.*
@@ -129,6 +130,9 @@ fun EchoApp(
                     transcripts = remember(detailChunk.id) { viewModel.transcripts(detailChunk.id) },
                     asrState = asrState,
                     loadWaveform = { viewModel.loadWaveform(detailChunk.waveformPath) },
+                    loadSpeechWaveform = {
+                        viewModel.loadSpeechWaveform(detailChunk.speechAudioPath)
+                    },
                     onBack = { detailId = null },
                     onTranscribe = { viewModel.transcribe(detailChunk) },
                     onDeleteOriginal = { viewModel.deleteOriginal(detailChunk) },
@@ -144,6 +148,7 @@ fun EchoApp(
                             transcriptCount = transcriptCount,
                             recordingActive = recordingActive,
                             recordingStartedAtMs = recordingStartedAtMs,
+                            chunkDurationMinutes = settings.chunkDurationMinutes,
                             onStartRecording = onStartRecording,
                             onStopRecording = onStopRecording,
                             onOpen = { detailId = it.id },
@@ -179,6 +184,7 @@ fun EchoApp(
                             chunks = chunks,
                             onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
+                            onChunkDurationMinutes = viewModel::setChunkDurationMinutes,
                             onVadBackend = viewModel::setVadBackend,
                             onVadThreshold = viewModel::setVadThreshold,
                             onVadSegmentGapMinutes = viewModel::setVadSegmentGapMinutes,
@@ -230,6 +236,7 @@ private fun TodayScreen(
     transcriptCount: Int,
     recordingActive: Boolean,
     recordingStartedAtMs: Long,
+    chunkDurationMinutes: Int,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onOpen: (AudioChunkEntity) -> Unit,
@@ -251,6 +258,7 @@ private fun TodayScreen(
         RecordingHero(
             active = recordingActive,
             startedAtMs = recordingStartedAtMs,
+            chunkDurationMinutes = chunkDurationMinutes,
             onStart = onStartRecording,
             onStop = onStopRecording,
         )
@@ -281,6 +289,7 @@ private fun TodayScreen(
 private fun RecordingHero(
     active: Boolean,
     startedAtMs: Long,
+    chunkDurationMinutes: Int,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -328,9 +337,9 @@ private fun RecordingHero(
             )
             Text(
                 if (active) {
-                    "录音期间不运行 VAD；每个 10 分钟 chunk 完成后再后台分析和裁剪。"
+                    "录音期间只执行 AudioRecord + AAC/M4A；VAD 在充电或结束记录后处理。"
                 } else {
-                    "录音以 10 分钟 M4A 分片保存，可在历史记录中回听和转写。"
+                    "录音按 " + chunkDurationMinutes + " 分钟 M4A 分片保存，可在设置中修改。" 
                 },
                 color = Color(0xFFA4B4D4),
                 fontSize = 13.sp,
@@ -460,6 +469,7 @@ private fun RecordingDetailScreen(
     transcripts: Flow<List<TranscriptSegmentEntity>>,
     asrState: AsrUiState,
     loadWaveform: suspend () -> List<Float>,
+    loadSpeechWaveform: suspend () -> List<Float>,
     onBack: () -> Unit,
     onTranscribe: () -> Unit,
     onDeleteOriginal: () -> Unit,
@@ -474,6 +484,13 @@ private fun RecordingDetailScreen(
         key2 = chunk.postProcessState,
     ) {
         value = loadWaveform()
+    }
+    val speechWaveform by produceState(
+        initialValue = emptyList<Float>(),
+        key1 = chunk.speechAudioPath,
+        key2 = chunk.postProcessState,
+    ) {
+        value = loadSpeechWaveform()
     }
 
     var tab by rememberSaveable(chunk.id) { mutableIntStateOf(0) }
@@ -580,13 +597,14 @@ private fun RecordingDetailScreen(
                     waveform = waveform,
                     ranges = rangeList,
                     previewRequest = previewRequest,
+                    title = "原始波形时间轴",
+                    rangeLegend = "蓝色背景 = 合并后的会话段（可包含短暂停顿）",
                 )
             } else if (!chunk.speechAudioPath.isNullOrBlank()) {
                 InfoPanel(
                     "原始时间轴不可用",
-                    "原始素材已由你确认删除。下面仍可播放 VAD 裁剪版，但 VAD 区间保留的是原始录音时间坐标。",
+                    "原始素材已由你确认删除。下面只保留一套 VAD 裁剪版波形播放器；会话段仍使用原始录音时间坐标。",
                 )
-                SimpleAudioPlayer(path = chunk.speechAudioPath)
             }
 
             if (!chunk.speechAudioPath.isNullOrBlank() && File(chunk.speechAudioPath).exists()) {
@@ -597,12 +615,19 @@ private fun RecordingDetailScreen(
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("VAD 裁剪版", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "按会话段保留音频；小于分段阈值的停顿也会保留，并在段首尾加入 400 ms / 500 ms 保护。裁剪后约 " +
+                            "按底层 VAD 检测区间裁剪，只保留语音附近音频，并在段首尾加入 400 ms / 500 ms 保护。裁剪后约 " +
                                 formatDuration(chunk.speechDurationMs) + "。",
                             color = EchoMuted,
                             fontSize = 12.sp,
                         )
-                        SimpleAudioPlayer(path = chunk.speechAudioPath)
+                        WaveformAudioPlayer(
+                            path = chunk.speechAudioPath,
+                            waveform = speechWaveform,
+                            ranges = emptyList(),
+                            previewRequest = null,
+                            title = "VAD 裁剪版波形",
+                            rangeLegend = null,
+                        )
                         if (chunk.originalAvailable) {
                             OutlinedButton(onClick = { confirmDeleteOriginal = true }) {
                                 Icon(Icons.Outlined.DeleteSweep, null)
@@ -781,6 +806,8 @@ private fun WaveformAudioPlayer(
     waveform: List<Float>,
     ranges: List<AudioRangeEntity>,
     previewRequest: VadPreviewRequest?,
+    title: String,
+    rangeLegend: String?,
 ) {
     val file = remember(path) { File(path) }
     var prepared by remember(path) { mutableStateOf(false) }
@@ -855,7 +882,7 @@ private fun WaveformAudioPlayer(
                 }
                 Spacer(Modifier.width(10.dp))
                 Column {
-                    Text("原始波形时间轴", fontWeight = FontWeight.SemiBold)
+                    Text(title, fontWeight = FontWeight.SemiBold)
                     Text(
                         if (prepared) {
                             formatMs(position.toLong()) + " / " + formatMs(duration.toLong())
@@ -950,14 +977,16 @@ private fun WaveformAudioPlayer(
                 )
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    color = EchoBlue.copy(alpha = 0.13f),
-                    shape = RoundedCornerShape(4.dp),
-                    modifier = Modifier.size(width = 22.dp, height = 10.dp),
-                ) {}
-                Spacer(Modifier.width(7.dp))
-                Text("蓝色背景 = 合并后的会话段（可包含短暂停顿）", color = EchoMuted, fontSize = 11.sp)
+            if (rangeLegend != null && ranges.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        color = EchoBlue.copy(alpha = 0.13f),
+                        shape = RoundedCornerShape(4.dp),
+                        modifier = Modifier.size(width = 22.dp, height = 10.dp),
+                    ) {}
+                    Spacer(Modifier.width(7.dp))
+                    Text(rangeLegend, color = EchoMuted, fontSize = 11.sp)
+                }
             }
         }
     }
@@ -1148,6 +1177,7 @@ private fun SettingsScreen(
     chunks: List<AudioChunkEntity>,
     onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
+    onChunkDurationMinutes: (Int) -> Unit,
     onVadBackend: (VadBackend) -> Unit,
     onVadThreshold: (Float) -> Unit,
     onVadSegmentGapMinutes: (Int) -> Unit,
@@ -1207,10 +1237,37 @@ private fun SettingsScreen(
         modifier = modifier,
     ) {
         Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("录音分片", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "每 " + settings.chunkDurationMinutes + " 分钟保存一个 M4A chunk",
+                    color = EchoBlue,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Slider(
+                    value = settings.chunkDurationMinutes.toFloat(),
+                    onValueChange = { onChunkDurationMinutes(it.toInt()) },
+                    valueRange =
+                        RecordingForegroundService.MIN_CHUNK_DURATION_MINUTES.toFloat()..
+                            RecordingForegroundService.MAX_CHUNK_DURATION_MINUTES.toFloat(),
+                    steps =
+                        RecordingForegroundService.MAX_CHUNK_DURATION_MINUTES -
+                            RecordingForegroundService.MIN_CHUNK_DURATION_MINUTES - 1,
+                )
+                Text(
+                    "可设置 5–60 分钟，例如 15 分钟。只影响新的切分时机，不修改或重写任何已有录音文件。",
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "VAD 只在 chunk 完成后运行。可以在同一条原始录音上切换不同模型重新分析，直接比较波形 overlay 和会话段。",
+                    "持续录音期间默认不主动跑 VAD；chunk 会等待充电，或在你结束录音后立即处理。仍可在同一条原始录音上切换模型重新分析。",
                     color = EchoMuted,
                     fontSize = 13.sp,
                     lineHeight = 19.sp,
@@ -1281,7 +1338,7 @@ private fun SettingsScreen(
 
         SettingSwitch(
             "仅 Wi‑Fi 自动同步",
-            "周期同步时只在非计费网络执行；手动“立即同步”仍可使用当前网络。",
+            "后处理完成后事件触发同步；仅 Wi‑Fi 时等待非计费网络。另保留 6 小时一次的低频兜底同步。",
             settings.wifiOnly,
             onWifiOnly,
         )
@@ -1343,7 +1400,8 @@ private fun SettingsScreen(
 
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；每 10 分钟滚动一个 chunk。chunk 完成后才运行当前选择的 VAD 引擎。",
+            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；当前每 " +
+                settings.chunkDurationMinutes + " 分钟滚动一个 chunk。录音期间只保留轻量录音链路，VAD/裁剪延后执行。",
         )
     }
 }
