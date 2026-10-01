@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <aaudio/AAudio.h>
 #include <atomic>
+#include <dlfcn.h>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -60,7 +61,19 @@ Java_com_memoflow_benchmark_AAudioPowerProbe_nativeStart(
         return 0;
     }
 
-    probe->mmapUsed = AAudioStream_isMMapUsed(probe->stream);
+    // NDK 26 does not declare AAudioStream_isMMapUsed even though newer
+    // Android releases export it. Resolve it dynamically so the APK remains
+    // buildable with the current CI NDK and can still report MMAP on devices
+    // whose libaaudio provides the symbol.
+    using IsMMapUsedFn = bool (*)(AAudioStream*);
+    if (void* lib = dlopen("libaaudio.so", RTLD_NOW | RTLD_LOCAL)) {
+        auto fn = reinterpret_cast<IsMMapUsedFn>(
+                dlsym(lib, "AAudioStream_isMMapUsed"));
+        if (fn != nullptr) {
+            probe->mmapUsed = fn(probe->stream);
+        }
+        dlclose(lib);
+    }
     probe->sampleRate = AAudioStream_getSampleRate(probe->stream);
     probe->channelCount = AAudioStream_getChannelCount(probe->stream);
 
