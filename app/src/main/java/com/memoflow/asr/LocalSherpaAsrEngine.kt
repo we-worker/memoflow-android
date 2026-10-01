@@ -39,7 +39,7 @@ class LocalSherpaAsrEngine(
                 val endMs = reference.endMs.toLong().coerceAtLeast(startMs + 1L)
 
                 while (startMs < endMs) {
-                    val windowEnd = minOf(startMs + LOCAL_WINDOW_MS, endMs)
+                    val windowEnd = minOf(startMs + windowMsFor(spec), endMs)
                     val stream = recognizer.createStream()
                     try {
                         AsrAudioTools.feedM4aToStream(
@@ -88,7 +88,11 @@ class LocalSherpaAsrEngine(
                                 encoder = File(dir, "encoder.int8.onnx").absolutePath,
                                 decoder = File(dir, "decoder.int8.onnx").absolutePath,
                                 tokenizer = File(dir, "tokenizer").absolutePath,
-                                maxNewTokens = 512,
+                                maxTotalLen = 512,
+                                maxNewTokens = 128,
+                                temperature = 1e-6f,
+                                topP = 0.8f,
+                                seed = 42,
                             ),
                         numThreads = THREADS,
                         provider = "cpu",
@@ -130,8 +134,18 @@ class LocalSherpaAsrEngine(
         )
     }
 
+    private fun windowMsFor(spec: LocalAsrModelSpec): Long =
+        when (spec.family) {
+            // Qwen3-ASR 的 512-token KV 上限同时容纳提示、音频 token 和输出 token。
+            // 60 s 窗口很容易把生成空间挤掉，表现为只返回 "language" 等模板残片。
+            LocalAsrFamily.QWEN3_ASR -> QWEN_WINDOW_MS
+            LocalAsrFamily.FUNASR_NANO,
+            LocalAsrFamily.PARAFORMER -> DEFAULT_WINDOW_MS
+        }
+
     companion object {
-        private const val LOCAL_WINDOW_MS = 60_000L
+        private const val QWEN_WINDOW_MS = 20_000L
+        private const val DEFAULT_WINDOW_MS = 60_000L
         private const val THREADS = 2
     }
 }
