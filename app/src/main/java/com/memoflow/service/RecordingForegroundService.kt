@@ -12,9 +12,7 @@ import com.memoflow.data.ChunkSyncWorker
 import com.memoflow.data.MemoDatabase
 import com.memoflow.data.toEntity
 import com.memoflow.processing.AudioPostProcessWorker
-import com.memoflow.recording.AacMediaCodecEncoder
-import com.memoflow.recording.AudioRecordSource
-import com.memoflow.recording.M4aChunkWriter
+import com.memoflow.recording.MediaRecorderChunkRecorder
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +20,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,54 +99,44 @@ class RecordingForegroundService : Service() {
             .build()
 
     private suspend fun runRecordingLoop() {
-        val source = AudioRecordSource()
-        var encoder = AacMediaCodecEncoder()
-        var writer = M4aChunkWriter(File(filesDir, "audio"))
-        var chunkStartMs = System.currentTimeMillis()
-        var chunkDurationMs = currentChunkDurationMs()
-        val sessionChunkIds = linkedSetOf<String>()
+        while (currentCoroutineContext().isActive) {
+            val recorder =
+                MediaRecorderChunkRecorder(
+                    dir = File(filesDir, "audio"),
+                    sampleRate = SAMPLE_RATE,
+                    channels = CHANNELS,
+                    bitrate = BITRATE,
+                )
 
-        try {
-            source.start()
-            encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
-            writer.start()
+            var cancelled = false
+            try {
+                recorder.start()
+                delay(currentChunkDurationMs())
+            } catch (_: CancellationException) {
+                // User stopped recording. Finalize the partial chunk below, but do
+                // not trigger VAD/waveform here; those run on charging or detail open.
+                cancelled = true
+            } catch (_: Throwable) {
+                recorder.abort()
+                break
+            }
 
-            while (currentCoroutineContext().isActive) {
-                val frame = source.read() ?: break
+            val chunk =
+                withContext(NonCancellable) {
+                    runCatching { recorder.finish() }.getOrNull()
+                }
 
-                val encoded = encoder.encode(frame)
-                encoder.outputFormat?.let(writer::onFormat)
-                encoded.forEach(writer::write)
-
-                if (System.currentTimeMillis() - chunkStartMs >= chunkDurationMs) {
-                    finalizeEncoderIntoWriter(encoder, writer)
-                    finishChunkAndDeferPostProcess(writer)?.let(sessionChunkIds::add)
-
-                    encoder = AacMediaCodecEncoder()
-                    encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
-                    writer = M4aChunkWriter(File(filesDir, "audio")).also { it.start() }
-                    chunkStartMs = System.currentTimeMillis()
-                    // A settings change applies to the next chunk, avoiding a
-                    // SharedPreferences read in the hot recording loop.
-                    chunkDurationMs = currentChunkDurationMs()
+            if (chunk != null) {
+                withContext(NonCancellable) {
+                    db.chunks().upsert(chunk.toEntity())
+                    AudioPostProcessWorker.enqueueDeferred(
+                        this@RecordingForegroundService,
+                        chunk.id,
+                    )
                 }
             }
-        } finally {
-            withContext(NonCancellable) {
-                runCatching { finalizeEncoderIntoWriter(encoder, writer) }
-                runCatching {
-                    finishChunkAndDeferPostProcess(writer)?.let(sessionChunkIds::add)
-                }
-                runCatching { encoder.close() }
-                runCatching { source.stop() }
 
-                // While recording, post-processing waits for charging. Once the user
-                // explicitly stops recording, replace those constrained jobs with
-                // immediate jobs so the new VAD/speech-only results become available.
-                sessionChunkIds.forEach { chunkId ->
-                    AudioPostProcessWorker.enqueue(this@RecordingForegroundService, chunkId)
-                }
-            }
+            if (cancelled || !currentCoroutineContext().isActive) break
         }
     }
 
