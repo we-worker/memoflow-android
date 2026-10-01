@@ -160,7 +160,7 @@ class AudioPostProcessWorker(
         }
     }
 
-    private fun decodeAnalyze(
+    private suspend fun decodeAnalyze(
         source: File,
         waveformFile: File,
         backend: VadBackend,
