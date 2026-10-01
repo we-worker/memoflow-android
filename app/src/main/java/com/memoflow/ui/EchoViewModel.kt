@@ -290,23 +290,6 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun transcribe(chunk: AudioChunkEntity) {
-        if (!chunk.originalAvailable || !File(chunk.audioPath).exists()) {
-            _asrState.value =
-                AsrUiState.Error(
-                    chunk.id,
-                    "原始素材已删除，不能重新生成带原始时间坐标的 ASR；已有转写结果仍会保留",
-                )
-            return
-        }
-
-        val reference =
-            AudioReference(
-                chunkId = chunk.id,
-                startMs = 0,
-                endMs = chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-                audioPath = chunk.audioPath,
-            )
-
         val engine =
             runCatching { createAsrEngine() }
                 .getOrElse {
@@ -318,7 +301,53 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         _asrState.value = AsrUiState.Running(chunk.id)
         viewModelScope.launch {
             runCatching {
-                engine.transcribe(reference)
+                val ranges = dao.rangesForChunk(chunk.id)
+                val original = File(chunk.audioPath)
+                val speech = chunk.speechAudioPath?.let(::File)?.takeIf { it.exists() }
+
+                when {
+                    chunk.originalAvailable && original.exists() && ranges.isNotEmpty() -> {
+                        // VAD 已经确定了需要保留的会话区间。逐段送入 ASR，既减少无声输入，
+                        // 又让 TranscriptSegment 保持原始 chunk 的时间坐标。
+                        ranges.flatMap { range ->
+                            engine.transcribe(
+                                AudioReference(
+                                    chunkId = chunk.id,
+                                    startMs = range.startOffsetMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                    endMs = range.endOffsetMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                    audioPath = original.absolutePath,
+                                ),
+                            )
+                        }
+                    }
+
+                    speech != null && chunk.speechDurationMs > 0L -> {
+                        // 原始素材允许被清理；speech-only M4A 是可独立用于 ASR 的长期素材。
+                        // 此时使用压缩后的 speech 时间轴，避免错误地阻止重新转写。
+                        engine.transcribe(
+                            AudioReference(
+                                chunkId = chunk.id,
+                                startMs = 0,
+                                endMs = chunk.speechDurationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                audioPath = speech.absolutePath,
+                            ),
+                        )
+                    }
+
+                    chunk.originalAvailable && original.exists() -> {
+                        // VAD 尚无有效区间时保留兜底，避免完全无法转写。
+                        engine.transcribe(
+                            AudioReference(
+                                chunkId = chunk.id,
+                                startMs = 0,
+                                endMs = chunk.durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                audioPath = original.absolutePath,
+                            ),
+                        )
+                    }
+
+                    else -> error("原始素材已删除，且 speech-only 音频不可用，无法重新转写")
+                }
             }.onSuccess { segments ->
                 dao.replaceTranscripts(chunk.id, segments.map { it.toEntity() })
                 _asrState.value = AsrUiState.Done(chunk.id, segments.size)
