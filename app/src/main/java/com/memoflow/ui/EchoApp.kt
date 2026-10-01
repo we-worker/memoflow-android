@@ -1,5 +1,6 @@
 package com.memoflow.ui
 
+import android.content.Intent
 import android.media.MediaPlayer
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
@@ -17,12 +18,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memoflow.asr.*
+import com.memoflow.benchmark.PowerBenchmarkActivity
 import com.memoflow.data.*
 import com.memoflow.service.RecordingForegroundService
 import com.memoflow.vad.VadBackend
@@ -1267,7 +1270,7 @@ private fun SettingsScreen(
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("语音活动检测", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "持续录音期间默认不主动跑 VAD；chunk 会等待充电，或在你结束录音后立即处理。仍可在同一条原始录音上切换模型重新分析。",
+                    "持续录音期间不运行 VAD 或波形分析；chunk 只在设备充电时后台处理，或在你点进该条录音详情时立即处理。",
                     color = EchoMuted,
                     fontSize = 13.sp,
                     lineHeight = 19.sp,
@@ -1398,10 +1401,32 @@ private fun SettingsScreen(
             }
         }
 
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            val context = LocalContext.current
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("功耗实验", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "独立比较 A：旧 AudioRecord 链路、B：MediaRecorder 直录、C：AAudio/MMAP 输入探针。测试结果不会写入录音数据库。",
+                    color = EchoMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(Intent(context, PowerBenchmarkActivity::class.java))
+                    },
+                ) {
+                    Icon(Icons.Outlined.Science, null)
+                    Spacer(Modifier.width(7.dp))
+                    Text("打开 A/B/C 功耗测试")
+                }
+            }
+        }
+
         InfoPanel(
             "录音格式",
-            "16 kHz · 单声道 · PCM16 → AAC-LC 24 kbps → M4A；当前每 " +
-                settings.chunkDurationMinutes + " 分钟滚动一个 chunk。录音期间只保留轻量录音链路，VAD/裁剪延后执行。",
+            "16 kHz · 单声道 · MediaRecorder 直接 AAC-LC 24 kbps → M4A；当前每 " +
+                settings.chunkDurationMinutes + " 分钟滚动一个 chunk。chunk 完成不计算 SHA-256；VAD 与波形只在充电或打开详情时处理。",
         )
     }
 }
