@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.memoflow.asr.*
 import com.memoflow.data.*
+import com.memoflow.service.RecordingForegroundService
 import com.memoflow.vad.VadBackend
 import java.io.File
 import java.time.*
@@ -50,7 +51,6 @@ fun EchoApp(
     viewModel: EchoViewModel,
     recordingActive: Boolean,
     recordingStartedAtMs: Long,
-    chunkDurationMinutes: Int,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
 ) {
@@ -236,6 +236,7 @@ private fun TodayScreen(
     transcriptCount: Int,
     recordingActive: Boolean,
     recordingStartedAtMs: Long,
+    chunkDurationMinutes: Int,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onOpen: (AudioChunkEntity) -> Unit,
