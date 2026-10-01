@@ -65,4 +65,5 @@ target_link_libraries(
     ncnn
     log
     aaudio
+    dl
 )
