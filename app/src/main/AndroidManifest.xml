@@ -15,6 +15,10 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
 
+        <activity
+            android:name=".benchmark.PowerBenchmarkActivity"
+            android:exported="false" />
+
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
@@ -24,6 +28,11 @@
 
         <service
             android:name=".service.RecordingForegroundService"
+            android:foregroundServiceType="microphone"
+            android:exported="false" />
+
+        <service
+            android:name=".benchmark.PowerBenchmarkService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
 

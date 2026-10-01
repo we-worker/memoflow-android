@@ -7,7 +7,6 @@ import com.memoflow.domain.AudioChunk
 import com.memoflow.domain.ChunkState
 import com.memoflow.domain.EncodedAudioFrame
 import java.io.File
-import java.security.MessageDigest
 
 class M4aChunkWriter(
     private val dir: File,
@@ -81,17 +80,6 @@ class M4aChunkWriter(
         }
 
         val endTimeMs = System.currentTimeMillis()
-        val digest = MessageDigest.getInstance("SHA-256")
-        outputFile.inputStream().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        val checksum = digest.digest().joinToString("") { "%02x".format(it) }
-
         return AudioChunk(
             id = outputFile.name.substringBefore('.'),
             deviceId = "android-device",
@@ -105,7 +93,7 @@ class M4aChunkWriter(
             channels = channels,
             bitrate = bitrate,
             fileSize = outputFile.length(),
-            checksumSha256 = checksum,
+            checksumSha256 = "",
             state = ChunkState.COMPLETE,
         )
     }

@@ -83,11 +83,31 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
     val asrState: StateFlow<AsrUiState> = _asrState.asStateFlow()
 
     init {
+        // One initial snapshot only. Continuous 1.5 s polling kept the process
+        // needlessly active even when no model download was running.
+        refreshLocalModels()
+    }
+
+    private fun refreshLocalModels() {
         viewModelScope.launch {
-            while (isActive) {
-                _localModels.value = modelManager.snapshot()
-                delay(1_500)
-            }
+            _localModels.value = modelManager.snapshot()
+        }
+    }
+
+    private fun refreshLocalModelsWhileDownloading() {
+        viewModelScope.launch {
+            do {
+                val snapshot = modelManager.snapshot()
+                _localModels.value = snapshot
+                val active =
+                    snapshot.any {
+                        it.status == LocalModelInstallStatus.WAITING_FOR_WIFI ||
+                            it.status == LocalModelInstallStatus.DOWNLOADING ||
+                            it.status == LocalModelInstallStatus.VERIFYING ||
+                            it.status == LocalModelInstallStatus.INSTALLING
+                    }
+                if (active) delay(2_000)
+            } while (active && isActive)
         }
     }
 
@@ -236,19 +256,17 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadLocalModel(modelId: String) {
         modelManager.enqueueDownload(modelId)
-        viewModelScope.launch {
-            delay(200)
-            _localModels.value = modelManager.snapshot()
-        }
+        refreshLocalModelsWhileDownloading()
     }
 
     fun cancelLocalModelDownload(modelId: String) {
         modelManager.cancelDownload(modelId)
+        refreshLocalModels()
     }
 
     fun deleteLocalModel(modelId: String) {
         modelManager.deleteModel(modelId)
-        viewModelScope.launch { _localModels.value = modelManager.snapshot() }
+        refreshLocalModels()
     }
 
     fun saveAliyunApiKey(value: String) {
