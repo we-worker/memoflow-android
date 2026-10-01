@@ -104,7 +104,9 @@ class AudioPostProcessWorker(
                 buildSpeechOnlyAudio(
                     chunkId = chunkId,
                     pcmFile = pcmFile,
-                    ranges = sessions,
+                    // speech-only 必须使用底层 VAD detection，而不是 5 分钟规则合并后的
+                    // Conversation Session；否则会把会话内部的长静音也编码进去。
+                    ranges = analysis.ranges,
                     originalDurationMs = chunk.durationMs,
                 )
 
