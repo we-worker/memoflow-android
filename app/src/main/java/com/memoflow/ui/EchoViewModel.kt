@@ -306,9 +306,21 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                 val speech = chunk.speechAudioPath?.let(::File)?.takeIf { it.exists() }
 
                 when {
+                    speech != null && chunk.speechDurationMs > 0L -> {
+                        // ASR 默认消费 raw VAD 裁出的 speech-only M4A：更少静音、更低本地推理
+                        // 与云端上传压力；原始 M4A 清理后仍可重新转写。
+                        engine.transcribe(
+                            AudioReference(
+                                chunkId = chunk.id,
+                                startMs = 0,
+                                endMs = chunk.speechDurationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                audioPath = speech.absolutePath,
+                            ),
+                        )
+                    }
+
                     chunk.originalAvailable && original.exists() && ranges.isNotEmpty() -> {
-                        // VAD 已经确定了需要保留的会话区间。逐段送入 ASR，既减少无声输入，
-                        // 又让 TranscriptSegment 保持原始 chunk 的时间坐标。
+                        // 兼容尚未生成 speech-only 的 chunk。
                         ranges.flatMap { range ->
                             engine.transcribe(
                                 AudioReference(
@@ -319,19 +331,6 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                                 ),
                             )
                         }
-                    }
-
-                    speech != null && chunk.speechDurationMs > 0L -> {
-                        // 原始素材允许被清理；speech-only M4A 是可独立用于 ASR 的长期素材。
-                        // 此时使用压缩后的 speech 时间轴，避免错误地阻止重新转写。
-                        engine.transcribe(
-                            AudioReference(
-                                chunkId = chunk.id,
-                                startMs = 0,
-                                endMs = chunk.speechDurationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
-                                audioPath = speech.absolutePath,
-                            ),
-                        )
                     }
 
                     chunk.originalAvailable && original.exists() -> {
