@@ -103,6 +103,7 @@ class RecordingForegroundService : Service() {
         var encoder = AacMediaCodecEncoder()
         var writer = M4aChunkWriter(File(filesDir, "audio"))
         var chunkStartMs = System.currentTimeMillis()
+        var chunkDurationMs = currentChunkDurationMs()
         val sessionChunkIds = linkedSetOf<String>()
 
         try {
@@ -117,7 +118,6 @@ class RecordingForegroundService : Service() {
                 encoder.outputFormat?.let(writer::onFormat)
                 encoded.forEach(writer::write)
 
-                val chunkDurationMs = currentChunkDurationMs()
                 if (System.currentTimeMillis() - chunkStartMs >= chunkDurationMs) {
                     finalizeEncoderIntoWriter(encoder, writer)
                     finishChunkAndDeferPostProcess(writer)?.let(sessionChunkIds::add)
@@ -126,6 +126,9 @@ class RecordingForegroundService : Service() {
                     encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
                     writer = M4aChunkWriter(File(filesDir, "audio")).also { it.start() }
                     chunkStartMs = System.currentTimeMillis()
+                    // A settings change applies to the next chunk, avoiding a
+                    // SharedPreferences read in the hot recording loop.
+                    chunkDurationMs = currentChunkDurationMs()
                 }
             }
         } finally {
