@@ -91,8 +91,8 @@ class PowerBenchmarkService : Service() {
                         MODE_B -> runMediaRecorder()
                         MODE_C -> runAAudioProbe()
                     }
-                } catch (_: CancellationException) {
-                    throw
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (error: Throwable) {
                     errorMessage = error.message ?: error.javaClass.simpleName
                 }
