@@ -377,6 +377,38 @@ private fun BenchmarkResultCard(
                         currentMa,
                     ),
                 )
+
+                if (mode != PowerBenchmarkService.MODE_D) {
+                    val baselineDuration =
+                        prefs.getLong(
+                            PowerBenchmarkService.resultKey(
+                                PowerBenchmarkService.MODE_D,
+                                PowerBenchmarkService.FIELD_DURATION_MS,
+                            ),
+                            0L,
+                        )
+                    val baselineCharge =
+                        prefs.getLong(
+                            PowerBenchmarkService.resultKey(
+                                PowerBenchmarkService.MODE_D,
+                                PowerBenchmarkService.FIELD_CHARGE_DELTA_UAH,
+                            ),
+                            Long.MIN_VALUE,
+                        )
+                    if (baselineDuration > 0L && baselineCharge != Long.MIN_VALUE) {
+                        val baselineConsumed = (-baselineCharge).coerceAtLeast(0L)
+                        val baselineCurrent =
+                            baselineConsumed / 1000.0 /
+                                (baselineDuration / 3_600_000.0)
+                        Text(
+                            String.format(
+                                Locale.US,
+                                "扣除 D 基线后的录音增量：约 %.1f mA",
+                                currentMa - baselineCurrent,
+                            ),
+                        )
+                    }
+                }
             }
 
             if (bytes > 0L) {
