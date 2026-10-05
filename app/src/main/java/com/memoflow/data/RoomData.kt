@@ -111,6 +111,9 @@ interface ChunkDao {
     @Query("UPDATE audio_chunks SET postProcessState = :state WHERE id = :id")
     suspend fun updatePostProcessState(id: String, state: String)
 
+    @Query("UPDATE audio_chunks SET waveformPath = :waveformPath WHERE id = :id")
+    suspend fun updateWaveformPath(id: String, waveformPath: String?)
+
     @Query("""
         UPDATE audio_chunks
         SET postProcessState = 'STALE',
