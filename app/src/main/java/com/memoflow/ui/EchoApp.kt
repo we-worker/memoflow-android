@@ -1256,7 +1256,7 @@ private fun SettingsScreen(
                             RecordingForegroundService.MIN_CHUNK_DURATION_MINUTES - 1,
                 )
                 Text(
-                    "可设置 5–60 分钟，例如 15 分钟。只影响新的切分时机，不修改或重写任何已有录音文件。",
+                    "可设置 5–60 分钟，默认 30 分钟。只影响新的切分时机，不修改或重写任何已有录音文件。",
                     color = EchoMuted,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
