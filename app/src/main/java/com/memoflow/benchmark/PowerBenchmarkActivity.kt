@@ -46,9 +46,7 @@ class PowerBenchmarkActivity : ComponentActivity() {
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                pendingAction?.let(::startBenchmarkService)
-            }
+            if (granted) pendingAction?.let(::startBenchmarkService)
             pendingAction = null
         }
 
@@ -75,6 +73,11 @@ class PowerBenchmarkActivity : ComponentActivity() {
         val recordingPrefs =
             getSharedPreferences(RecordingForegroundService.PREFS_RECORDING, Context.MODE_PRIVATE)
         if (recordingPrefs.getBoolean(RecordingForegroundService.KEY_RECORDING_ACTIVE, false)) {
+            return
+        }
+
+        if (action == PowerBenchmarkService.ACTION_START_D) {
+            startBenchmarkService(action)
             return
         }
 
@@ -144,15 +147,17 @@ private fun PowerBenchmarkScreen(
     val lastDuration = prefs.getLong(PowerBenchmarkService.KEY_LAST_DURATION_MS, 0L)
     val lastCpu = prefs.getLong(PowerBenchmarkService.KEY_LAST_CPU_MS, 0L)
     val lastBytes = prefs.getLong(PowerBenchmarkService.KEY_LAST_OUTPUT_BYTES, 0L)
-    val lastCharge = prefs.getLong(
-        PowerBenchmarkService.KEY_LAST_CHARGE_DELTA_UAH,
-        Long.MIN_VALUE,
-    )
+    val lastCharge =
+        prefs.getLong(
+            PowerBenchmarkService.KEY_LAST_CHARGE_DELTA_UAH,
+            Long.MIN_VALUE,
+        )
     val lastBatteryStart = prefs.getInt(PowerBenchmarkService.KEY_LAST_BATTERY_START, -1)
     val lastBatteryEnd = prefs.getInt(PowerBenchmarkService.KEY_LAST_BATTERY_END, -1)
-    val lastMmap = prefs.getBoolean(PowerBenchmarkService.KEY_LAST_MMAP_USED, false)
-    val lastSampleRate = prefs.getInt(PowerBenchmarkService.KEY_LAST_NATIVE_SAMPLE_RATE, 0)
-    val lastFrames = prefs.getLong(PowerBenchmarkService.KEY_LAST_FRAMES_READ, 0L)
+    val actualSampleRate = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_SAMPLE_RATE, 0)
+    val actualChannels = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_CHANNELS, 0)
+    val actualBitrate = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_BITRATE, 0)
+    val actualMime = prefs.getString(PowerBenchmarkService.KEY_LAST_ACTUAL_MIME, "").orEmpty()
     val lastError = prefs.getString(PowerBenchmarkService.KEY_LAST_ERROR, "").orEmpty()
 
     Column(
@@ -163,41 +168,62 @@ private fun PowerBenchmarkScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("A/B/C 录音功耗测试", fontSize = 26.sp)
+            Text("MediaRecorder 功耗参数测试", fontSize = 25.sp)
             OutlinedButton(onClick = onBack) { Text("返回") }
         }
 
         Text(
-            "建议三种方案分别在相同电量、相同网络、屏幕关闭条件下录 30–60 分钟。测试服务会保持前台通知，停止后记录电量计、进程 CPU 时间和输出大小。",
+            "先跑 D 空闲基线，再分别跑 B1–B4。建议每组 30–60 分钟，保持相近电量、网络和屏幕关闭状态。最终比较“录音平均电流 − D 基线平均电流”。",
             style = MaterialTheme.typography.bodyMedium,
         )
 
         if (productionRecording) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Card(
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+            ) {
                 Text(
-                    "正式录音正在运行，请先结束正式录音再做 A/B/C 测试，避免两个麦克风会话互相干扰。",
+                    "正式录音正在运行，请先结束正式录音再测试。",
                     Modifier.padding(14.dp),
                 )
             }
         }
 
         BenchmarkCard(
-            title = "A · 旧链路",
-            description = "AudioRecord → App PCM → MediaCodec AAC → MediaMuxer M4A。用于作为旧版本基线。",
+            title = "D · 空闲基线",
+            description = "不打开麦克风、不编码、不写音频，只保留测试前台服务，用于估计同条件下整机基础放电。",
             enabled = !active && !productionRecording,
-            onClick = { onStart(PowerBenchmarkService.ACTION_START_A) },
+            onClick = { onStart(PowerBenchmarkService.ACTION_START_D) },
+        )
+
+        HorizontalDivider()
+        Text("MediaRecorder 参数矩阵", fontSize = 20.sp)
+
+        BenchmarkCard(
+            title = "B1 · 16 kHz / MIC",
+            description = "当前正式版参数：16 kHz、单声道、24 kbps AAC、MIC。",
+            enabled = !active && !productionRecording,
+            onClick = { onStart(PowerBenchmarkService.ACTION_START_B16_MIC) },
         )
         BenchmarkCard(
-            title = "B · MediaRecorder",
-            description = "Android framework 直接录 AAC/M4A。正式版现在使用的低功耗路径。",
+            title = "B2 · 48 kHz / MIC",
+            description = "验证设备底层原生 48 kHz 路径是否能避免重采样并进一步省电。",
             enabled = !active && !productionRecording,
-            onClick = { onStart(PowerBenchmarkService.ACTION_START_B) },
+            onClick = { onStart(PowerBenchmarkService.ACTION_START_B48_MIC) },
         )
         BenchmarkCard(
-            title = "C · AAudio / MMAP 探针",
-            description = "AAudio POWER_SAVING 大块阻塞读取，只测试输入数据路径，不做 AAC/文件 I/O；会记录设备是否真的进入 MMAP。",
+            title = "B3 · 16 kHz / VOICE_RECOGNITION",
+            description = "比较 VOICE_RECOGNITION 的厂商 DSP/前处理路径与普通 MIC 的功耗差异。",
             enabled = !active && !productionRecording,
-            onClick = { onStart(PowerBenchmarkService.ACTION_START_C) },
+            onClick = { onStart(PowerBenchmarkService.ACTION_START_B16_VOICE) },
+        )
+        BenchmarkCard(
+            title = "B4 · 48 kHz / VOICE_RECOGNITION",
+            description = "48 kHz + VOICE_RECOGNITION 组合。",
+            enabled = !active && !productionRecording,
+            onClick = { onStart(PowerBenchmarkService.ACTION_START_B48_VOICE) },
         )
 
         if (active) {
@@ -208,17 +234,21 @@ private fun PowerBenchmarkScreen(
                         fontSize = 18.sp,
                     )
                     val elapsed =
-                        if (startElapsed > 0L) (nowElapsed - startElapsed).coerceAtLeast(0L) else 0L
+                        if (startElapsed > 0L) {
+                            (nowElapsed - startElapsed).coerceAtLeast(0L)
+                        } else {
+                            0L
+                        }
                     Text("已运行 " + formatDuration(elapsed))
                     Button(onClick = onStop) { Text("停止并保存结果") }
-                    Text("可以锁屏继续测试，之后从通知或这里停止。")
+                    Text("建议锁屏继续测试，以减少屏幕造成的误差。")
                 }
             }
         }
 
         HorizontalDivider()
-
         Text("最近一次结果", fontSize = 20.sp)
+
         if (lastMode.isBlank()) {
             Text("还没有测试结果。")
         } else {
@@ -227,27 +257,58 @@ private fun PowerBenchmarkScreen(
                     Text(PowerBenchmarkService.modeDescription(lastMode))
                     Text("测试时长：" + formatDuration(lastDuration))
                     Text("MemoFlow 进程 CPU 时间：" + formatDuration(lastCpu))
+
+                    if (lastDuration > 0L) {
+                        val cpuPercent = 100.0 * lastCpu / lastDuration
+                        Text(String.format(Locale.US, "进程 CPU / 墙钟：%.1f%%", cpuPercent))
+                    }
+
                     if (lastBatteryStart >= 0 && lastBatteryEnd >= 0) {
                         Text("系统电量：" + lastBatteryStart + "% → " + lastBatteryEnd + "%")
                     }
+
                     if (lastCharge != Long.MIN_VALUE) {
-                        val consumed = -lastCharge
+                        val consumedUah = (-lastCharge).coerceAtLeast(0L)
+                        val durationHours = lastDuration / 3_600_000.0
+                        val currentMa =
+                            if (durationHours > 0.0) consumedUah / 1000.0 / durationHours else 0.0
+                        val perMinute =
+                            if (lastDuration > 0L) {
+                                consumedUah * 60_000.0 / lastDuration
+                            } else {
+                                0.0
+                            }
+
                         Text(
                             "Charge counter 变化：" +
-                                String.format(Locale.US, "%,d µAh", lastCharge) +
-                                if (consumed > 0) "（约消耗 " + consumed + " µAh）" else "",
+                                String.format(Locale.US, "%,d µAh", lastCharge),
+                        )
+                        Text(
+                            String.format(
+                                Locale.US,
+                                "约 %.0f µAh/分钟 · 等效整机平均电流 %.1f mA",
+                                perMinute,
+                                currentMa,
+                            ),
                         )
                     } else {
                         Text("本机未提供可用的 charge counter。")
                     }
+
                     if (lastBytes > 0L) {
                         Text("输出文件：" + formatBytes(lastBytes))
                     }
-                    if (lastMode == PowerBenchmarkService.MODE_C) {
-                        Text("AAudio MMAP：" + if (lastMmap) "是" else "否 / 回落 legacy path")
-                        Text("AAudio 实际采样率：" + lastSampleRate + " Hz")
-                        Text("读取帧数：" + lastFrames)
+
+                    if (actualSampleRate > 0 || actualMime.isNotBlank()) {
+                        Text(
+                            "实际文件参数：" +
+                                (actualMime.ifBlank { "audio" }) + " · " +
+                                actualSampleRate + " Hz · " +
+                                actualChannels + " ch" +
+                                if (actualBitrate > 0) " · " + actualBitrate / 1000 + " kbps" else "",
+                        )
                     }
+
                     if (lastError.isNotBlank()) {
                         Text("错误：" + lastError, color = MaterialTheme.colorScheme.error)
                     }
@@ -256,7 +317,7 @@ private fun PowerBenchmarkScreen(
         }
 
         Text(
-            "注意：C 只用于判断普通 APK 是否能拿到低功耗 AAudio/MMAP 输入路径，不和 A/B 的完整 AAC 写盘负载完全等价。正式版本固定使用 B，不给普通用户暴露录音模式切换。",
+            "正式录音仍固定使用 MediaRecorder，不会跟随这里的测试参数自动切换。你把 D、B1–B4 的结果发给我后，再决定是否修改正式版采样率或 AudioSource。",
             style = MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.height(20.dp))
