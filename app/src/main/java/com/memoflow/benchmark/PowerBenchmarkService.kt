@@ -7,13 +7,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaRecorder
 import android.os.BatteryManager
 import android.os.IBinder
 import android.os.Process
 import androidx.core.app.NotificationCompat
-import com.memoflow.recording.AacMediaCodecEncoder
-import com.memoflow.recording.AudioRecordSource
-import com.memoflow.recording.M4aChunkWriter
 import com.memoflow.recording.MediaRecorderChunkRecorder
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -22,12 +22,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.awaitCancellation
 
 class PowerBenchmarkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -40,9 +38,10 @@ class PowerBenchmarkService : Service() {
     private var startBatteryPercent = -1
 
     @Volatile private var outputBytes = 0L
-    @Volatile private var mmapUsed = false
-    @Volatile private var nativeSampleRate = 0
-    @Volatile private var framesRead = 0L
+    @Volatile private var actualSampleRate = 0
+    @Volatile private var actualChannels = 0
+    @Volatile private var actualBitrate = 0
+    @Volatile private var actualMime = ""
     @Volatile private var errorMessage = ""
 
     override fun onCreate() {
@@ -52,9 +51,11 @@ class PowerBenchmarkService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START_A -> startTest(MODE_A)
-            ACTION_START_B -> startTest(MODE_B)
-            ACTION_START_C -> startTest(MODE_C)
+            ACTION_START_D -> startTest(MODE_D)
+            ACTION_START_B16_MIC -> startTest(MODE_B16_MIC)
+            ACTION_START_B48_MIC -> startTest(MODE_B48_MIC)
+            ACTION_START_B16_VOICE -> startTest(MODE_B16_VOICE)
+            ACTION_START_B48_VOICE -> startTest(MODE_B48_VOICE)
             ACTION_STOP -> stopTest()
         }
         return START_NOT_STICKY
@@ -65,9 +66,10 @@ class PowerBenchmarkService : Service() {
 
         mode = requestedMode
         outputBytes = 0L
-        mmapUsed = false
-        nativeSampleRate = 0
-        framesRead = 0L
+        actualSampleRate = 0
+        actualChannels = 0
+        actualBitrate = 0
+        actualMime = ""
         errorMessage = ""
 
         startElapsedMs = android.os.SystemClock.elapsedRealtime()
@@ -87,9 +89,27 @@ class PowerBenchmarkService : Service() {
             scope.launch {
                 try {
                     when (mode) {
-                        MODE_A -> runLegacyAudioRecord()
-                        MODE_B -> runMediaRecorder()
-                        MODE_C -> runAAudioProbe()
+                        MODE_D -> runIdleBaseline()
+                        MODE_B16_MIC ->
+                            runMediaRecorder(
+                                sampleRate = 16_000,
+                                audioSource = MediaRecorder.AudioSource.MIC,
+                            )
+                        MODE_B48_MIC ->
+                            runMediaRecorder(
+                                sampleRate = 48_000,
+                                audioSource = MediaRecorder.AudioSource.MIC,
+                            )
+                        MODE_B16_VOICE ->
+                            runMediaRecorder(
+                                sampleRate = 16_000,
+                                audioSource = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            )
+                        MODE_B48_VOICE ->
+                            runMediaRecorder(
+                                sampleRate = 48_000,
+                                audioSource = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            )
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -107,79 +127,76 @@ class PowerBenchmarkService : Service() {
             }
     }
 
-    private suspend fun runLegacyAudioRecord() {
-        val dir = File(cacheDir, "power_benchmark/a").apply {
-            deleteRecursively()
-            mkdirs()
-        }
-        val source = AudioRecordSource()
-        val encoder = AacMediaCodecEncoder()
-        val writer = M4aChunkWriter(dir)
-
-        source.start()
-        encoder.open(SAMPLE_RATE, CHANNELS, BITRATE)
-        writer.start()
-
-        try {
-            while (currentCoroutineContext().isActive) {
-                val frame = source.read() ?: break
-                val encoded = encoder.encode(frame)
-                encoder.outputFormat?.let(writer::onFormat)
-                encoded.forEach(writer::write)
-            }
-        } finally {
-            withContext(NonCancellable) {
-                runCatching {
-                    val tail = encoder.flush()
-                    encoder.outputFormat?.let(writer::onFormat)
-                    tail.forEach(writer::write)
-                }
-                runCatching { encoder.close() }
-                runCatching { source.stop() }
-                val chunk = runCatching { writer.finish() }.getOrNull()
-                outputBytes = chunk?.fileSize ?: 0L
-            }
-        }
+    private suspend fun runIdleBaseline() {
+        awaitCancellation()
     }
 
-    private suspend fun runMediaRecorder() {
-        val dir = File(cacheDir, "power_benchmark/b").apply {
-            deleteRecursively()
-            mkdirs()
-        }
+    private suspend fun runMediaRecorder(
+        sampleRate: Int,
+        audioSource: Int,
+    ) {
+        val dir =
+            File(cacheDir, "power_benchmark/" + mode.lowercase()).apply {
+                deleteRecursively()
+                mkdirs()
+            }
+
         val recorder =
             MediaRecorderChunkRecorder(
                 dir = dir,
-                sampleRate = SAMPLE_RATE,
+                sampleRate = sampleRate,
                 channels = CHANNELS,
                 bitrate = BITRATE,
+                audioSource = audioSource,
             )
         recorder.start()
+
         try {
             awaitCancellation()
         } finally {
             withContext(NonCancellable) {
                 val chunk = runCatching { recorder.finish() }.getOrNull()
                 outputBytes = chunk?.fileSize ?: 0L
+                chunk?.audioPath?.let { inspectRecordedFile(File(it)) }
             }
         }
     }
 
-    private suspend fun runAAudioProbe() {
-        val probe = AAudioPowerProbe()
-        val handle = probe.start()
-        require(handle != 0L) { "AAudio input stream open failed" }
-
-        mmapUsed = probe.isMMapUsed(handle)
-        nativeSampleRate = probe.sampleRate(handle)
-
+    private fun inspectRecordedFile(file: File) {
+        if (!file.exists()) return
+        val extractor = MediaExtractor()
         try {
-            awaitCancellation()
-        } finally {
-            withContext(NonCancellable) {
-                framesRead = probe.framesRead(handle)
-                probe.stop(handle)
+            extractor.setDataSource(file.absolutePath)
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (!mime.startsWith("audio/")) continue
+
+                actualMime = mime
+                actualSampleRate =
+                    if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    } else {
+                        0
+                    }
+                actualChannels =
+                    if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                    } else {
+                        0
+                    }
+                actualBitrate =
+                    if (format.containsKey(MediaFormat.KEY_BIT_RATE)) {
+                        format.getInteger(MediaFormat.KEY_BIT_RATE)
+                    } else {
+                        0
+                    }
+                break
             }
+        } catch (_: Throwable) {
+            // The power result is still useful even if metadata inspection fails.
+        } finally {
+            runCatching { extractor.release() }
         }
     }
 
@@ -200,18 +217,36 @@ class PowerBenchmarkService : Service() {
                 Long.MIN_VALUE
             }
 
-        prefs().edit()
-            .putString(KEY_LAST_MODE, mode)
-            .putLong(KEY_LAST_DURATION_MS, (endElapsed - startElapsedMs).coerceAtLeast(0L))
-            .putLong(KEY_LAST_CPU_MS, (endCpu - startCpuMs).coerceAtLeast(0L))
-            .putLong(KEY_LAST_OUTPUT_BYTES, outputBytes)
-            .putLong(KEY_LAST_CHARGE_DELTA_UAH, chargeDelta)
-            .putInt(KEY_LAST_BATTERY_START, startBatteryPercent)
-            .putInt(KEY_LAST_BATTERY_END, endBattery)
-            .putBoolean(KEY_LAST_MMAP_USED, mmapUsed)
-            .putInt(KEY_LAST_NATIVE_SAMPLE_RATE, nativeSampleRate)
-            .putLong(KEY_LAST_FRAMES_READ, framesRead)
-            .putString(KEY_LAST_ERROR, errorMessage)
+        val durationMs = (endElapsed - startElapsedMs).coerceAtLeast(0L)
+        val cpuMs = (endCpu - startCpuMs).coerceAtLeast(0L)
+        val editor =
+            prefs().edit()
+                .putString(KEY_LAST_MODE, mode)
+                .putLong(KEY_LAST_DURATION_MS, durationMs)
+                .putLong(KEY_LAST_CPU_MS, cpuMs)
+                .putLong(KEY_LAST_OUTPUT_BYTES, outputBytes)
+                .putLong(KEY_LAST_CHARGE_DELTA_UAH, chargeDelta)
+                .putInt(KEY_LAST_BATTERY_START, startBatteryPercent)
+                .putInt(KEY_LAST_BATTERY_END, endBattery)
+                .putInt(KEY_LAST_ACTUAL_SAMPLE_RATE, actualSampleRate)
+                .putInt(KEY_LAST_ACTUAL_CHANNELS, actualChannels)
+                .putInt(KEY_LAST_ACTUAL_BITRATE, actualBitrate)
+                .putString(KEY_LAST_ACTUAL_MIME, actualMime)
+                .putString(KEY_LAST_ERROR, errorMessage)
+
+        // Keep one result per test mode so D/B1/B2/B3/B4 remain visible together.
+        editor
+            .putLong(resultKey(mode, FIELD_DURATION_MS), durationMs)
+            .putLong(resultKey(mode, FIELD_CPU_MS), cpuMs)
+            .putLong(resultKey(mode, FIELD_OUTPUT_BYTES), outputBytes)
+            .putLong(resultKey(mode, FIELD_CHARGE_DELTA_UAH), chargeDelta)
+            .putInt(resultKey(mode, FIELD_BATTERY_START), startBatteryPercent)
+            .putInt(resultKey(mode, FIELD_BATTERY_END), endBattery)
+            .putInt(resultKey(mode, FIELD_ACTUAL_SAMPLE_RATE), actualSampleRate)
+            .putInt(resultKey(mode, FIELD_ACTUAL_CHANNELS), actualChannels)
+            .putInt(resultKey(mode, FIELD_ACTUAL_BITRATE), actualBitrate)
+            .putString(resultKey(mode, FIELD_ACTUAL_MIME), actualMime)
+            .putString(resultKey(mode, FIELD_ERROR), errorMessage)
             .apply()
     }
 
@@ -233,7 +268,7 @@ class PowerBenchmarkService : Service() {
     private fun buildNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("MemoFlow A/B/C 功耗测试")
+            .setContentTitle("MemoFlow 功耗参数测试")
             .setContentText(modeDescription(mode))
             .setOngoing(true)
             .addAction(
@@ -271,14 +306,19 @@ class PowerBenchmarkService : Service() {
 
     companion object {
         const val PREFS = "power_benchmark"
-        const val ACTION_START_A = "benchmark_start_a"
-        const val ACTION_START_B = "benchmark_start_b"
-        const val ACTION_START_C = "benchmark_start_c"
+
+        const val ACTION_START_D = "benchmark_start_d"
+        const val ACTION_START_B16_MIC = "benchmark_start_b16_mic"
+        const val ACTION_START_B48_MIC = "benchmark_start_b48_mic"
+        const val ACTION_START_B16_VOICE = "benchmark_start_b16_voice"
+        const val ACTION_START_B48_VOICE = "benchmark_start_b48_voice"
         const val ACTION_STOP = "benchmark_stop"
 
-        const val MODE_A = "A"
-        const val MODE_B = "B"
-        const val MODE_C = "C"
+        const val MODE_D = "D"
+        const val MODE_B16_MIC = "B16_MIC"
+        const val MODE_B48_MIC = "B48_MIC"
+        const val MODE_B16_VOICE = "B16_VOICE"
+        const val MODE_B48_VOICE = "B48_VOICE"
 
         const val KEY_ACTIVE = "active"
         const val KEY_MODE = "mode"
@@ -290,22 +330,43 @@ class PowerBenchmarkService : Service() {
         const val KEY_LAST_CHARGE_DELTA_UAH = "last_charge_delta_uah"
         const val KEY_LAST_BATTERY_START = "last_battery_start"
         const val KEY_LAST_BATTERY_END = "last_battery_end"
-        const val KEY_LAST_MMAP_USED = "last_mmap_used"
-        const val KEY_LAST_NATIVE_SAMPLE_RATE = "last_native_sample_rate"
-        const val KEY_LAST_FRAMES_READ = "last_frames_read"
+        const val KEY_LAST_ACTUAL_SAMPLE_RATE = "last_actual_sample_rate"
+        const val KEY_LAST_ACTUAL_CHANNELS = "last_actual_channels"
+        const val KEY_LAST_ACTUAL_BITRATE = "last_actual_bitrate"
+        const val KEY_LAST_ACTUAL_MIME = "last_actual_mime"
         const val KEY_LAST_ERROR = "last_error"
+
+        const val FIELD_DURATION_MS = "duration_ms"
+        const val FIELD_CPU_MS = "cpu_ms"
+        const val FIELD_OUTPUT_BYTES = "output_bytes"
+        const val FIELD_CHARGE_DELTA_UAH = "charge_delta_uah"
+        const val FIELD_BATTERY_START = "battery_start"
+        const val FIELD_BATTERY_END = "battery_end"
+        const val FIELD_ACTUAL_SAMPLE_RATE = "actual_sample_rate"
+        const val FIELD_ACTUAL_CHANNELS = "actual_channels"
+        const val FIELD_ACTUAL_BITRATE = "actual_bitrate"
+        const val FIELD_ACTUAL_MIME = "actual_mime"
+        const val FIELD_ERROR = "error"
+
+        fun resultKey(mode: String, field: String): String =
+            "result_" + mode.lowercase() + "_" + field
 
         private const val CHANNEL_ID = "power_benchmark"
         private const val NOTIFICATION_ID = 71
-        private const val SAMPLE_RATE = 16_000
         private const val CHANNELS = 1
         private const val BITRATE = 24_000
 
         fun modeDescription(mode: String): String =
             when (mode) {
-                MODE_A -> "A · AudioRecord + MediaCodec + M4A"
-                MODE_B -> "B · MediaRecorder 直接 AAC/M4A"
-                MODE_C -> "C · AAudio POWER_SAVING / MMAP 探针"
+                MODE_D -> "D · 空闲基线（不打开麦克风）"
+                MODE_B16_MIC -> "B1 · MediaRecorder 16 kHz / MIC"
+                MODE_B48_MIC -> "B2 · MediaRecorder 48 kHz / MIC"
+                MODE_B16_VOICE -> "B3 · MediaRecorder 16 kHz / VOICE_RECOGNITION"
+                MODE_B48_VOICE -> "B4 · MediaRecorder 48 kHz / VOICE_RECOGNITION"
+                // Keep labels for previously saved benchmark results.
+                "A" -> "A · 旧 AudioRecord + MediaCodec 基线"
+                "B" -> "B · 旧 MediaRecorder 16 kHz / MIC"
+                "C" -> "C · 旧 AAudio/MMAP 探针"
                 else -> "未开始"
             }
     }

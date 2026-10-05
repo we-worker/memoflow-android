@@ -48,7 +48,6 @@ add_library(
     memoflow_firered
     SHARED
     firered_jni.cpp
-    aaudio_benchmark_jni.cpp
     "${FIRERED_STREAM_SOURCE}"
     "${FIRERED_FFT_SOURCE}"
 )
@@ -64,6 +63,4 @@ target_link_libraries(
     memoflow_firered
     ncnn
     log
-    aaudio
-    dl
 )

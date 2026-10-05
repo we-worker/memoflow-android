@@ -14,6 +14,7 @@ class MediaRecorderChunkRecorder(
     private val sampleRate: Int = 16_000,
     private val channels: Int = 1,
     private val bitrate: Int = 24_000,
+    private val audioSource: Int = MediaRecorder.AudioSource.MIC,
 ) {
     private var recorder: MediaRecorder? = null
     private var file: File? = null
@@ -26,7 +27,7 @@ class MediaRecorderChunkRecorder(
         val output = File(dir, "chunk_" + System.currentTimeMillis() + ".m4a")
         val mediaRecorder =
             MediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setAudioSource(audioSource)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setAudioSamplingRate(sampleRate)

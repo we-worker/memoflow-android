@@ -190,7 +190,7 @@ class RecordingForegroundService : Service() {
         const val KEY_VAD_SEGMENT_GAP_MINUTES = "vad_segment_gap_minutes"
         const val DEFAULT_VAD_SEGMENT_GAP_MINUTES = 5
         const val KEY_CHUNK_DURATION_MINUTES = "chunk_duration_minutes"
-        const val DEFAULT_CHUNK_DURATION_MINUTES = 10
+        const val DEFAULT_CHUNK_DURATION_MINUTES = 30
         const val MIN_CHUNK_DURATION_MINUTES = 5
         const val MAX_CHUNK_DURATION_MINUTES = 60
 
