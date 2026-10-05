@@ -185,7 +185,6 @@ fun EchoApp(
                             asrSettings = asrSettings,
                             localModels = localModels,
                             chunks = chunks,
-                            onWifiOnly = viewModel::setWifiOnly,
                             onAutoResume = viewModel::setAutoResume,
                             onChunkDurationMinutes = viewModel::setChunkDurationMinutes,
                             onVadBackend = viewModel::setVadBackend,
@@ -340,7 +339,7 @@ private fun RecordingHero(
             )
             Text(
                 if (active) {
-                    "录音期间只执行 AudioRecord + AAC/M4A；VAD 在充电或结束记录后处理。"
+                    "录音期间由 MediaRecorder 直接写 AAC/M4A；VAD 与波形只在充电或打开详情时处理。"
                 } else {
                     "录音按 " + chunkDurationMinutes + " 分钟 M4A 分片保存，可在设置中修改。" 
                 },
@@ -1178,7 +1177,6 @@ private fun SettingsScreen(
     asrSettings: AsrSettings,
     localModels: List<LocalAsrModelState>,
     chunks: List<AudioChunkEntity>,
-    onWifiOnly: (Boolean) -> Unit,
     onAutoResume: (Boolean) -> Unit,
     onChunkDurationMinutes: (Int) -> Unit,
     onVadBackend: (VadBackend) -> Unit,
@@ -1339,11 +1337,9 @@ private fun SettingsScreen(
             }
         }
 
-        SettingSwitch(
-            "仅 Wi‑Fi 自动同步",
-            "后处理完成后事件触发同步；仅 Wi‑Fi 时等待非计费网络。另保留 6 小时一次的低频兜底同步。",
-            settings.wifiOnly,
-            onWifiOnly,
+        InfoPanel(
+            "自动同步策略",
+            "自动 PC 同步固定只在“正在充电 + Wi‑Fi/非计费网络”时执行；“立即同步”按钮仍可在当前已连接网络上手动触发，不要求充电。",
         )
         SettingSwitch(
             "重启后恢复意图",
@@ -1406,7 +1402,7 @@ private fun SettingsScreen(
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("功耗实验", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "独立比较 A：旧 AudioRecord 链路、B：MediaRecorder 直录、C：AAudio/MMAP 输入探针。测试结果不会写入录音数据库。",
+                    "先测 D 空闲基线，再比较 MediaRecorder 的 16/48 kHz 与 MIC/VOICE_RECOGNITION 四组参数。测试结果不会写入录音数据库。",
                     color = EchoMuted,
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
@@ -1418,7 +1414,7 @@ private fun SettingsScreen(
                 ) {
                     Icon(Icons.Outlined.Science, null)
                     Spacer(Modifier.width(7.dp))
-                    Text("打开 A/B/C 功耗测试")
+                    Text("打开 MediaRecorder 功耗参数测试")
                 }
             }
         }
