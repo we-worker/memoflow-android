@@ -217,19 +217,36 @@ class PowerBenchmarkService : Service() {
                 Long.MIN_VALUE
             }
 
-        prefs().edit()
-            .putString(KEY_LAST_MODE, mode)
-            .putLong(KEY_LAST_DURATION_MS, (endElapsed - startElapsedMs).coerceAtLeast(0L))
-            .putLong(KEY_LAST_CPU_MS, (endCpu - startCpuMs).coerceAtLeast(0L))
-            .putLong(KEY_LAST_OUTPUT_BYTES, outputBytes)
-            .putLong(KEY_LAST_CHARGE_DELTA_UAH, chargeDelta)
-            .putInt(KEY_LAST_BATTERY_START, startBatteryPercent)
-            .putInt(KEY_LAST_BATTERY_END, endBattery)
-            .putInt(KEY_LAST_ACTUAL_SAMPLE_RATE, actualSampleRate)
-            .putInt(KEY_LAST_ACTUAL_CHANNELS, actualChannels)
-            .putInt(KEY_LAST_ACTUAL_BITRATE, actualBitrate)
-            .putString(KEY_LAST_ACTUAL_MIME, actualMime)
-            .putString(KEY_LAST_ERROR, errorMessage)
+        val durationMs = (endElapsed - startElapsedMs).coerceAtLeast(0L)
+        val cpuMs = (endCpu - startCpuMs).coerceAtLeast(0L)
+        val editor =
+            prefs().edit()
+                .putString(KEY_LAST_MODE, mode)
+                .putLong(KEY_LAST_DURATION_MS, durationMs)
+                .putLong(KEY_LAST_CPU_MS, cpuMs)
+                .putLong(KEY_LAST_OUTPUT_BYTES, outputBytes)
+                .putLong(KEY_LAST_CHARGE_DELTA_UAH, chargeDelta)
+                .putInt(KEY_LAST_BATTERY_START, startBatteryPercent)
+                .putInt(KEY_LAST_BATTERY_END, endBattery)
+                .putInt(KEY_LAST_ACTUAL_SAMPLE_RATE, actualSampleRate)
+                .putInt(KEY_LAST_ACTUAL_CHANNELS, actualChannels)
+                .putInt(KEY_LAST_ACTUAL_BITRATE, actualBitrate)
+                .putString(KEY_LAST_ACTUAL_MIME, actualMime)
+                .putString(KEY_LAST_ERROR, errorMessage)
+
+        // Keep one result per test mode so D/B1/B2/B3/B4 remain visible together.
+        editor
+            .putLong(resultKey(mode, FIELD_DURATION_MS), durationMs)
+            .putLong(resultKey(mode, FIELD_CPU_MS), cpuMs)
+            .putLong(resultKey(mode, FIELD_OUTPUT_BYTES), outputBytes)
+            .putLong(resultKey(mode, FIELD_CHARGE_DELTA_UAH), chargeDelta)
+            .putInt(resultKey(mode, FIELD_BATTERY_START), startBatteryPercent)
+            .putInt(resultKey(mode, FIELD_BATTERY_END), endBattery)
+            .putInt(resultKey(mode, FIELD_ACTUAL_SAMPLE_RATE), actualSampleRate)
+            .putInt(resultKey(mode, FIELD_ACTUAL_CHANNELS), actualChannels)
+            .putInt(resultKey(mode, FIELD_ACTUAL_BITRATE), actualBitrate)
+            .putString(resultKey(mode, FIELD_ACTUAL_MIME), actualMime)
+            .putString(resultKey(mode, FIELD_ERROR), errorMessage)
             .apply()
     }
 
@@ -318,6 +335,21 @@ class PowerBenchmarkService : Service() {
         const val KEY_LAST_ACTUAL_BITRATE = "last_actual_bitrate"
         const val KEY_LAST_ACTUAL_MIME = "last_actual_mime"
         const val KEY_LAST_ERROR = "last_error"
+
+        const val FIELD_DURATION_MS = "duration_ms"
+        const val FIELD_CPU_MS = "cpu_ms"
+        const val FIELD_OUTPUT_BYTES = "output_bytes"
+        const val FIELD_CHARGE_DELTA_UAH = "charge_delta_uah"
+        const val FIELD_BATTERY_START = "battery_start"
+        const val FIELD_BATTERY_END = "battery_end"
+        const val FIELD_ACTUAL_SAMPLE_RATE = "actual_sample_rate"
+        const val FIELD_ACTUAL_CHANNELS = "actual_channels"
+        const val FIELD_ACTUAL_BITRATE = "actual_bitrate"
+        const val FIELD_ACTUAL_MIME = "actual_mime"
+        const val FIELD_ERROR = "error"
+
+        fun resultKey(mode: String, field: String): String =
+            "result_" + mode.lowercase() + "_" + field
 
         private const val CHANNEL_ID = "power_benchmark"
         private const val NOTIFICATION_ID = 71
