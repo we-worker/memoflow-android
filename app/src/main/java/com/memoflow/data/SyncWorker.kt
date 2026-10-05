@@ -126,16 +126,11 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
         private const val EVENT_WORK_NAME = "memoflow-sync-event"
         private const val FALLBACK_SYNC_HOURS = 6L
 
-        private fun networkConstraint(context: Context, batteryNotLow: Boolean): Constraints {
-            val prefs = context.getSharedPreferences(PREFS_SYNC, Context.MODE_PRIVATE)
-            val wifiOnly = prefs.getBoolean("wifi_only", true)
-            val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
-
-            return Constraints.Builder()
-                .setRequiredNetworkType(networkType)
-                .setRequiresBatteryNotLow(batteryNotLow)
+        private fun automaticSyncConstraints(): Constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.UNMETERED)
+                .setRequiresCharging(true)
                 .build()
-        }
 
         /**
          * Low-frequency safety net. Normal uploads are event driven from completed
@@ -149,22 +144,25 @@ class ChunkSyncWorker(app: Context, params: WorkerParameters) : CoroutineWorker(
                     FALLBACK_SYNC_HOURS,
                     TimeUnit.HOURS,
                 )
-                    .setConstraints(networkConstraint(context, batteryNotLow = true))
+                    .setConstraints(automaticSyncConstraints())
                     .build(),
             )
         }
 
-        /** Coalesced event-driven sync after a chunk becomes ready for upload. */
+        /** Coalesced automatic sync: only while charging on unmetered/Wi-Fi network. */
         fun enqueue(context: Context) {
             WorkManager.getInstance(context).enqueueUniqueWork(
                 EVENT_WORK_NAME,
                 ExistingWorkPolicy.APPEND_OR_REPLACE,
                 OneTimeWorkRequestBuilder<ChunkSyncWorker>()
-                    .setConstraints(networkConstraint(context, batteryNotLow = true))
+                    .setConstraints(automaticSyncConstraints())
                     .build(),
             )
         }
 
+        /**
+         * Explicit user action: run on any connected network and do not require charging.
+         */
         fun runNow(context: Context) {
             WorkManager.getInstance(context).enqueue(
                 OneTimeWorkRequestBuilder<ChunkSyncWorker>()
