@@ -62,6 +62,13 @@ class AudioPostProcessWorker(
 
         val waveformFile =
             File(applicationContext.filesDir, "waveforms/" + chunkId + ".waveform")
+        val existingWaveform =
+            chunk.waveformPath
+                ?.let(::File)
+                ?.takeIf { it.exists() }
+                ?.let(WaveformStore::read)
+                .orEmpty()
+        val shouldGenerateWaveform = existingWaveform.isEmpty()
 
         try {
             val prefs =
@@ -96,15 +103,26 @@ class AudioPostProcessWorker(
                     RecordingForegroundService.DEFAULT_VAD_SEGMENT_GAP_MINUTES,
                 ).coerceIn(1, 10) * 60_000L
 
-            // Decode once and stream PCM directly to VAD + waveform. No 20-30 MB
-            // temporary PCM file is written for every chunk.
+            // Charging path decodes once for VAD + waveform. If the user already
+            // opened this detail and generated a waveform first, the VAD pass skips
+            // waveform accumulation and reuses the existing sidecar.
             val analysis =
                 decodeAnalyze(
                     source = original,
-                    waveformFile = waveformFile,
                     backend = backend,
                     threshold = threshold,
+                    collectWaveform = shouldGenerateWaveform,
                 )
+            val originalWaveform =
+                if (shouldGenerateWaveform) {
+                    analysis.waveform.also {
+                        if (it.isNotEmpty()) {
+                            WaveformStore.write(waveformFile, it)
+                        }
+                    }
+                } else {
+                    existingWaveform
+                }
             val sessions =
                 groupVadSessions(
                     ranges = analysis.ranges,
@@ -120,7 +138,7 @@ class AudioPostProcessWorker(
                     source = original,
                     ranges = analysis.ranges,
                     originalDurationMs = chunk.durationMs,
-                    originalWaveform = analysis.waveform,
+                    originalWaveform = originalWaveform,
                 )
 
             if (speech == null) {
@@ -136,7 +154,13 @@ class AudioPostProcessWorker(
                 id = chunkId,
                 speechAudioPath = speech?.file?.absolutePath,
                 speechDurationMs = speech?.durationMs ?: 0L,
-                waveformPath = waveformFile.absolutePath,
+                waveformPath =
+                    when {
+                        shouldGenerateWaveform && originalWaveform.isNotEmpty() ->
+                            waveformFile.absolutePath
+                        !chunk.waveformPath.isNullOrBlank() -> chunk.waveformPath
+                        else -> null
+                    },
                 state = "DONE",
                 appliedVadEngine = backend.name,
                 appliedVadThreshold = threshold,
@@ -162,9 +186,9 @@ class AudioPostProcessWorker(
 
     private suspend fun decodeAnalyze(
         source: File,
-        waveformFile: File,
         backend: VadBackend,
         threshold: Float,
+        collectWaveform: Boolean,
     ): AnalysisResult {
         val extractor = MediaExtractor()
         extractor.setDataSource(source.absolutePath)
@@ -210,7 +234,7 @@ class AudioPostProcessWorker(
                     )
             }
         val ranges = mutableListOf<AudioRange>()
-        val waveform = WaveformAccumulator()
+        val waveform = if (collectWaveform) WaveformAccumulator() else null
 
         var inputDone = false
         var outputDone = false
@@ -264,7 +288,7 @@ class AudioPostProcessWorker(
                             val bytes = ByteArray(info.size)
                             buffer.get(bytes)
 
-                            waveform.accept(bytes)
+                            waveform?.accept(bytes)
                             ranges +=
                                 vad.process(
                                     AudioFrame(
@@ -284,9 +308,7 @@ class AudioPostProcessWorker(
             }
 
             ranges += vad.flush()
-            val waveformValues = waveform.finish()
-            WaveformStore.write(waveformFile, waveformValues)
-            return AnalysisResult(ranges, waveformValues)
+            return AnalysisResult(ranges, waveform?.finish().orEmpty())
         } finally {
             runCatching { vad.close() }
             runCatching { decoder.stop() }
@@ -530,34 +552,53 @@ class AudioPostProcessWorker(
 
         private val processMutex = Mutex()
 
-        /** Immediate processing: explicit detail view or after recording stops. */
+        /** Immediate full processing requested explicitly by the user. */
         @JvmStatic
         fun enqueue(context: Context, chunkId: String) {
-            enqueueInternal(
-                context = context,
-                chunkId = chunkId,
-                requiresCharging = false,
+            val request =
+                OneTimeWorkRequestBuilder<AudioPostProcessWorker>()
+                    .setInputData(workDataOf(KEY_CHUNK_ID to chunkId))
+                    .build()
+
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "post-vad-" + chunkId,
+                ExistingWorkPolicy.REPLACE,
+                request,
             )
         }
 
-        /** During long-running recording, wait until the device is charging. */
+        /**
+         * Detail-open path: produce the waveform first so playback UI becomes useful
+         * quickly, then run VAD/speech-only processing.
+         */
+        fun enqueueForDetail(context: Context, chunkId: String) {
+            val waveformRequest =
+                OneTimeWorkRequestBuilder<WaveformGenerationWorker>()
+                    .setInputData(
+                        workDataOf(WaveformGenerationWorker.KEY_CHUNK_ID to chunkId),
+                    )
+                    .build()
+            val vadRequest =
+                OneTimeWorkRequestBuilder<AudioPostProcessWorker>()
+                    .setInputData(workDataOf(KEY_CHUNK_ID to chunkId))
+                    .build()
+
+            WorkManager.getInstance(context)
+                .beginUniqueWork(
+                    "post-vad-" + chunkId,
+                    ExistingWorkPolicy.REPLACE,
+                    waveformRequest,
+                )
+                .then(vadRequest)
+                .enqueue()
+        }
+
+        /** Background processing waits for both charging and a non-low battery. */
         fun enqueueDeferred(context: Context, chunkId: String) {
-            enqueueInternal(
-                context = context,
-                chunkId = chunkId,
-                requiresCharging = true,
-            )
-        }
-
-        private fun enqueueInternal(
-            context: Context,
-            chunkId: String,
-            requiresCharging: Boolean,
-        ) {
             val constraints =
                 Constraints.Builder()
                     .setRequiresBatteryNotLow(true)
-                    .setRequiresCharging(requiresCharging)
+                    .setRequiresCharging(true)
                     .build()
 
             val request =
