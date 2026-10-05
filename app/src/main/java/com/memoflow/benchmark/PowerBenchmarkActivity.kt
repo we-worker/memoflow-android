@@ -76,11 +76,6 @@ class PowerBenchmarkActivity : ComponentActivity() {
             return
         }
 
-        if (action == PowerBenchmarkService.ACTION_START_D) {
-            startBenchmarkService(action)
-            return
-        }
-
         if (
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
