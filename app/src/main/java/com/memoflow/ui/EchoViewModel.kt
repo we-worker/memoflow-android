@@ -126,8 +126,15 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
                 kotlin.math.abs(chunk.appliedVadThreshold - current.vadThreshold) < 0.0001f &&
                 chunk.appliedVadMergeSilenceMs == desiredGapMs
 
-        if (chunk.postProcessState == "DONE" && parametersMatch) return
-        AudioPostProcessWorker.enqueue(getApplication(), chunk.id)
+        val waveformReady =
+            chunk.waveformPath
+                ?.let(::File)
+                ?.takeIf { it.exists() }
+                ?.let(WaveformStore::read)
+                ?.isNotEmpty() == true
+
+        if (chunk.postProcessState == "DONE" && parametersMatch && waveformReady) return
+        AudioPostProcessWorker.enqueueForDetail(getApplication(), chunk.id)
     }
 
     suspend fun loadWaveform(path: String?): List<Float> =
