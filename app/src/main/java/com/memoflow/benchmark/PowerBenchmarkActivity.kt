@@ -3,6 +3,7 @@ package com.memoflow.benchmark
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.SystemClock
@@ -138,23 +139,6 @@ private fun PowerBenchmarkScreen(
         }
     }
 
-    val lastMode = prefs.getString(PowerBenchmarkService.KEY_LAST_MODE, "").orEmpty()
-    val lastDuration = prefs.getLong(PowerBenchmarkService.KEY_LAST_DURATION_MS, 0L)
-    val lastCpu = prefs.getLong(PowerBenchmarkService.KEY_LAST_CPU_MS, 0L)
-    val lastBytes = prefs.getLong(PowerBenchmarkService.KEY_LAST_OUTPUT_BYTES, 0L)
-    val lastCharge =
-        prefs.getLong(
-            PowerBenchmarkService.KEY_LAST_CHARGE_DELTA_UAH,
-            Long.MIN_VALUE,
-        )
-    val lastBatteryStart = prefs.getInt(PowerBenchmarkService.KEY_LAST_BATTERY_START, -1)
-    val lastBatteryEnd = prefs.getInt(PowerBenchmarkService.KEY_LAST_BATTERY_END, -1)
-    val actualSampleRate = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_SAMPLE_RATE, 0)
-    val actualChannels = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_CHANNELS, 0)
-    val actualBitrate = prefs.getInt(PowerBenchmarkService.KEY_LAST_ACTUAL_BITRATE, 0)
-    val actualMime = prefs.getString(PowerBenchmarkService.KEY_LAST_ACTUAL_MIME, "").orEmpty()
-    val lastError = prefs.getString(PowerBenchmarkService.KEY_LAST_ERROR, "").orEmpty()
-
     Column(
         Modifier
             .fillMaxSize()
@@ -242,73 +226,20 @@ private fun PowerBenchmarkScreen(
         }
 
         HorizontalDivider()
-        Text("最近一次结果", fontSize = 20.sp)
+        Text("结果对比", fontSize = 20.sp)
+        Text(
+            "每个模式会保留最近一次结果。跑完五组后直接比较 B1–B4 的平均电流，再减去 D 的平均电流。",
+            style = MaterialTheme.typography.bodySmall,
+        )
 
-        if (lastMode.isBlank()) {
-            Text("还没有测试结果。")
-        } else {
-            Card {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(PowerBenchmarkService.modeDescription(lastMode))
-                    Text("测试时长：" + formatDuration(lastDuration))
-                    Text("MemoFlow 进程 CPU 时间：" + formatDuration(lastCpu))
-
-                    if (lastDuration > 0L) {
-                        val cpuPercent = 100.0 * lastCpu / lastDuration
-                        Text(String.format(Locale.US, "进程 CPU / 墙钟：%.1f%%", cpuPercent))
-                    }
-
-                    if (lastBatteryStart >= 0 && lastBatteryEnd >= 0) {
-                        Text("系统电量：" + lastBatteryStart + "% → " + lastBatteryEnd + "%")
-                    }
-
-                    if (lastCharge != Long.MIN_VALUE) {
-                        val consumedUah = (-lastCharge).coerceAtLeast(0L)
-                        val durationHours = lastDuration / 3_600_000.0
-                        val currentMa =
-                            if (durationHours > 0.0) consumedUah / 1000.0 / durationHours else 0.0
-                        val perMinute =
-                            if (lastDuration > 0L) {
-                                consumedUah * 60_000.0 / lastDuration
-                            } else {
-                                0.0
-                            }
-
-                        Text(
-                            "Charge counter 变化：" +
-                                String.format(Locale.US, "%,d µAh", lastCharge),
-                        )
-                        Text(
-                            String.format(
-                                Locale.US,
-                                "约 %.0f µAh/分钟 · 等效整机平均电流 %.1f mA",
-                                perMinute,
-                                currentMa,
-                            ),
-                        )
-                    } else {
-                        Text("本机未提供可用的 charge counter。")
-                    }
-
-                    if (lastBytes > 0L) {
-                        Text("输出文件：" + formatBytes(lastBytes))
-                    }
-
-                    if (actualSampleRate > 0 || actualMime.isNotBlank()) {
-                        Text(
-                            "实际文件参数：" +
-                                (actualMime.ifBlank { "audio" }) + " · " +
-                                actualSampleRate + " Hz · " +
-                                actualChannels + " ch" +
-                                if (actualBitrate > 0) " · " + actualBitrate / 1000 + " kbps" else "",
-                        )
-                    }
-
-                    if (lastError.isNotBlank()) {
-                        Text("错误：" + lastError, color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            }
+        listOf(
+            PowerBenchmarkService.MODE_D,
+            PowerBenchmarkService.MODE_B16_MIC,
+            PowerBenchmarkService.MODE_B48_MIC,
+            PowerBenchmarkService.MODE_B16_VOICE,
+            PowerBenchmarkService.MODE_B48_VOICE,
+        ).forEach { mode ->
+            BenchmarkResultCard(mode = mode, prefs = prefs)
         }
 
         Text(
@@ -316,6 +247,154 @@ private fun PowerBenchmarkScreen(
             style = MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.height(20.dp))
+    }
+}
+
+@Composable
+private fun BenchmarkResultCard(
+    mode: String,
+    prefs: SharedPreferences,
+) {
+    val duration =
+        prefs.getLong(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_DURATION_MS,
+            ),
+            0L,
+        )
+    if (duration <= 0L) {
+        Card {
+            Column(Modifier.padding(14.dp)) {
+                Text(PowerBenchmarkService.modeDescription(mode))
+                Text("尚未测试", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        return
+    }
+
+    val cpu =
+        prefs.getLong(
+            PowerBenchmarkService.resultKey(mode, PowerBenchmarkService.FIELD_CPU_MS),
+            0L,
+        )
+    val bytes =
+        prefs.getLong(
+            PowerBenchmarkService.resultKey(mode, PowerBenchmarkService.FIELD_OUTPUT_BYTES),
+            0L,
+        )
+    val charge =
+        prefs.getLong(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_CHARGE_DELTA_UAH,
+            ),
+            Long.MIN_VALUE,
+        )
+    val batteryStart =
+        prefs.getInt(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_BATTERY_START,
+            ),
+            -1,
+        )
+    val batteryEnd =
+        prefs.getInt(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_BATTERY_END,
+            ),
+            -1,
+        )
+    val sampleRate =
+        prefs.getInt(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_ACTUAL_SAMPLE_RATE,
+            ),
+            0,
+        )
+    val channels =
+        prefs.getInt(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_ACTUAL_CHANNELS,
+            ),
+            0,
+        )
+    val bitrate =
+        prefs.getInt(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_ACTUAL_BITRATE,
+            ),
+            0,
+        )
+    val mime =
+        prefs.getString(
+            PowerBenchmarkService.resultKey(
+                mode,
+                PowerBenchmarkService.FIELD_ACTUAL_MIME,
+            ),
+            "",
+        ).orEmpty()
+    val error =
+        prefs.getString(
+            PowerBenchmarkService.resultKey(mode, PowerBenchmarkService.FIELD_ERROR),
+            "",
+        ).orEmpty()
+
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(PowerBenchmarkService.modeDescription(mode), fontSize = 17.sp)
+            Text(
+                "时长 " + formatDuration(duration) +
+                    " · CPU " + formatDuration(cpu) +
+                    String.format(Locale.US, " (%.1f%%)", 100.0 * cpu / duration),
+            )
+
+            if (batteryStart >= 0 && batteryEnd >= 0) {
+                Text("电量 " + batteryStart + "% → " + batteryEnd + "%")
+            }
+
+            if (charge != Long.MIN_VALUE) {
+                val consumedUah = (-charge).coerceAtLeast(0L)
+                val currentMa =
+                    if (duration > 0L) {
+                        consumedUah / 1000.0 / (duration / 3_600_000.0)
+                    } else {
+                        0.0
+                    }
+                val perMinute =
+                    if (duration > 0L) consumedUah * 60_000.0 / duration else 0.0
+                Text(
+                    String.format(
+                        Locale.US,
+                        "%,d µAh · %.0f µAh/min · %.1f mA",
+                        consumedUah,
+                        perMinute,
+                        currentMa,
+                    ),
+                )
+            }
+
+            if (bytes > 0L) {
+                Text("输出 " + formatBytes(bytes))
+            }
+
+            if (sampleRate > 0 || mime.isNotBlank()) {
+                Text(
+                    "实际 " + mime.ifBlank { "audio" } + " · " +
+                        sampleRate + " Hz · " + channels + " ch" +
+                        if (bitrate > 0) " · " + bitrate / 1000 + " kbps" else "",
+                )
+            }
+
+            if (error.isNotBlank()) {
+                Text("错误：" + error, color = MaterialTheme.colorScheme.error)
+            }
+        }
     }
 }
 
