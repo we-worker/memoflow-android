@@ -34,7 +34,9 @@ class WaveformGenerationWorker(
             if (existing != null) return@withContext Result.success()
 
             val waveform = AudioWaveformExtractor.extract(source)
-            if (waveform.isEmpty()) return@withContext Result.retry()
+            // Do not block the following VAD worker if fast waveform extraction
+            // fails; the full post-process pass can still regenerate it.
+            if (waveform.isEmpty()) return@withContext Result.success()
 
             val target =
                 File(applicationContext.filesDir, "waveforms/" + chunkId + ".waveform")
