@@ -29,7 +29,6 @@ import okhttp3.Request
 data class EchoSettings(
     val baseUrl: String = "",
     val apiKey: String = "",
-    val wifiOnly: Boolean = true,
     val autoResume: Boolean = true,
     val vadBackend: VadBackend = VadBackend.SILERO,
     val vadThreshold: Float = RecordingForegroundService.DEFAULT_SILERO_THRESHOLD,
@@ -169,12 +168,6 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         val cleaned = value.trim()
         syncPrefs.edit().putString(ChunkSyncWorker.KEY_API_KEY, cleaned).apply()
         _settings.value = _settings.value.copy(apiKey = cleaned)
-    }
-
-    fun setWifiOnly(enabled: Boolean) {
-        syncPrefs.edit().putBoolean("wifi_only", enabled).apply()
-        _settings.value = _settings.value.copy(wifiOnly = enabled)
-        ChunkSyncWorker.schedule(getApplication())
     }
 
     fun setAutoResume(enabled: Boolean) {
@@ -514,7 +507,6 @@ class EchoViewModel(application: Application) : AndroidViewModel(application) {
         return EchoSettings(
             baseUrl = syncPrefs.getString(ChunkSyncWorker.KEY_BASE_URL, "") ?: "",
             apiKey = syncPrefs.getString(ChunkSyncWorker.KEY_API_KEY, "") ?: "",
-            wifiOnly = syncPrefs.getBoolean("wifi_only", true),
             autoResume = recordingPrefs.getBoolean(BootReceiver.KEY_AUTO_START, true),
             vadBackend = backend,
             vadThreshold = threshold,
